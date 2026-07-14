@@ -170,9 +170,10 @@ function CardHeader({ title, icon, action }) {
 function Btn({ children, onClick, variant = "ghost", style = {}, disabled = false }) {
   const base = { fontSize: 12.5, border: "none", cursor: disabled ? "not-allowed" : "pointer", padding: "6px 13px", borderRadius: 8, fontWeight: 500, opacity: disabled ? 0.5 : 1, display: "inline-flex", alignItems: "center", gap: 5 };
   const vars = {
-    ghost:   { background: "none",    color: T.teal600, border: `0.5px solid ${T.border}` },
-    primary: { background: T.teal600, color: "#fff" },
-    danger:  { background: T.red50,   color: T.red600 },
+    ghost:       { background: "none",    color: T.teal600, border: `0.5px solid ${T.border}` },
+    primary:     { background: T.teal600, color: "#fff" },
+    danger:      { background: T.red50,   color: T.red600 },
+    dangerSolid: { background: T.red600,  color: "#fff" },
   };
   return <button onClick={disabled ? undefined : onClick} style={{ ...base, ...vars[variant], ...style }}>{children}</button>;
 }
@@ -192,6 +193,14 @@ function Spinner() {
     <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: 32 }}>
       <div style={{ width: 24, height: 24, border: `2.5px solid ${T.teal50}`, borderTop: `2.5px solid ${T.teal600}`, borderRadius: "50%", animation: "spin 0.7s linear infinite" }} />
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+    </div>
+  );
+}
+
+function FullScreenSpinner() {
+  return (
+    <div style={{ minHeight: "100vh", background: T.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <Spinner />
     </div>
   );
 }
@@ -254,6 +263,205 @@ function AdminLogin({ onLogin }) {
         </div>
         <div style={{ marginTop: 16, fontSize: 11.5, color: T.textMuted, textAlign: "center" }}>
           Credentials provided by your Aerofit super admin.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  PRO PLAN ACTIVATION GATE
+//  Shown in place of the entire dashboard when a Pro-plan gym's admin has
+//  not yet paid the ₹5,000/year activation fee (or it has lapsed). Blocks
+//  everything until payment clears — no bypass.
+// ══════════════════════════════════════════════════════════════════════════════
+function ProActivationGate({ gymInfo, amount, expired, onActivated }) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function pay() {
+    setLoading(true); setError("");
+    try {
+      await loadRazorpayScript();
+
+      const order = await apiFetch(`/gym/${gymInfo.gym_id}/pro-activation/create-order`, { method: "POST" });
+
+      const rzp = new window.Razorpay({
+        key: order.key_id,
+        amount: order.amount,
+        currency: order.currency,
+        name: order.name,
+        description: order.description,
+        order_id: order.order_id,
+        prefill: { email: order.prefill_email, name: order.prefill_name },
+        theme: { color: "#0F6E56" },
+        handler: async function (response) {
+          try {
+            await apiFetch(`/gym/${gymInfo.gym_id}/pro-activation/verify-payment`, {
+              method: "POST",
+              body: JSON.stringify({
+                razorpay_order_id:   response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature:  response.razorpay_signature,
+              }),
+            });
+            onActivated();
+          } catch (e) {
+            setError("Payment succeeded but verification failed. Contact Aerofit support with payment ID " + response.razorpay_payment_id);
+          } finally {
+            setLoading(false);
+          }
+        },
+        modal: {
+          ondismiss: function () { setLoading(false); },
+        },
+      });
+
+      rzp.open();
+    } catch (e) {
+      setError(e.message || "Could not start payment");
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", background: T.bg, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'DM Sans', system-ui, sans-serif", padding: 20 }}>
+      <div style={{ background: T.surface, borderRadius: 18, padding: 40, border: `0.5px solid ${T.border}`, width: 420, maxWidth: "94vw", boxShadow: "0 4px 32px rgba(0,0,0,0.08)", textAlign: "center" }}>
+        <div style={{ width: 56, height: 56, borderRadius: 14, background: T.purple50, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, margin: "0 auto 18px" }}>👑</div>
+        <div style={{ fontSize: 19, fontWeight: 700, color: T.text, marginBottom: 8 }}>
+          {expired ? "Renew Your Pro Plan" : "Activate Your Pro Plan"}
+        </div>
+        <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.6 }}>
+          <strong>{gymInfo.gym_name}</strong> is on the Aerofit <strong>Pro</strong> plan.{" "}
+          {expired
+            ? "Your yearly access has lapsed. Renew now to unlock your admin dashboard again."
+            : "Complete a one-time activation payment to unlock your admin dashboard for a full year."}
+        </div>
+        <div style={{ background: T.teal50, borderRadius: 12, padding: "16px 20px", margin: "22px 0" }}>
+          <div style={{ fontSize: 30, fontWeight: 700, color: T.teal700 }}>{fmtINR(amount)}</div>
+          <div style={{ fontSize: 12, color: T.teal600, marginTop: 2 }}>Valid for 1 year from today</div>
+        </div>
+        {error && <div style={{ fontSize: 12, color: T.red600, background: T.red50, padding: "10px 13px", borderRadius: 8, marginBottom: 16, textAlign: "left" }}>❌ {error}</div>}
+        <button onClick={pay} disabled={loading} style={{ width: "100%", background: T.teal600, color: "#fff", border: "none", borderRadius: 10, padding: "13px", fontSize: 14, fontWeight: 600, cursor: loading ? "not-allowed" : "pointer", opacity: loading ? 0.7 : 1 }}>
+          {loading ? "Opening payment…" : `💳 Pay ${fmtINR(amount)} & ${expired ? "Renew" : "Activate"}`}
+        </button>
+        <div style={{ marginTop: 18, fontSize: 11, color: T.textMuted, lineHeight: 1.5 }}>
+          Secured by Razorpay. Contact Aerofit support if you run into any issues completing payment.
+        </div>
+        <button
+          onClick={() => { sessionStorage.removeItem("af_admin"); sessionStorage.removeItem("gym_info"); window.location.reload(); }}
+          style={{ marginTop: 14, background: "none", border: "none", color: T.textMuted, fontSize: 12, cursor: "pointer", textDecoration: "underline" }}
+        >
+          Sign out
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  RENEWAL REMINDER BANNER
+//  Non-blocking — shown on every tab once the Pro fee is within 15 days of
+//  expiry, turning red inside the last 5 days. Dismissible per-session so it
+//  doesn't nag on every click, but reappears on next login until renewed.
+// ══════════════════════════════════════════════════════════════════════════════
+function RenewalReminderBanner({ daysLeft, expiresAt, onRenew, onDismiss }) {
+  const urgent = daysLeft <= 5;
+  return (
+    <div style={{
+      background: urgent ? T.red50 : T.amber50,
+      border: `0.5px solid ${urgent ? T.red200 : "#f0c070"}`,
+      borderRadius: 10, padding: "11px 16px", marginBottom: 18,
+      display: "flex", alignItems: "center", gap: 12, fontSize: 13,
+      color: urgent ? T.red600 : T.amber600, flexWrap: "wrap",
+    }}>
+      <span>{urgent ? "🚨" : "⏰"}</span>
+      <span style={{ flex: 1, minWidth: 200 }}>
+        <strong>Your Pro plan {daysLeft <= 0 ? "expires today" : `expires in ${daysLeft} day${daysLeft !== 1 ? "s" : ""}`}</strong>
+        {" "}({fmtDate(expiresAt)}). Renew now to avoid losing access to banners, notifications, and User IDs.
+      </span>
+      <Btn variant={urgent ? "dangerSolid" : "primary"} onClick={onRenew} style={{ fontSize: 12, padding: "6px 14px", flexShrink: 0 }}>
+        Renew Now
+      </Btn>
+      <button onClick={onDismiss} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 14, color: "inherit", opacity: 0.6, flexShrink: 0 }} title="Dismiss for now">✕</button>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  RENEW PRO PLAN MODAL
+//  Non-blocking version of ProActivationGate — opened from the reminder
+//  banner so the admin can renew early without losing dashboard access.
+// ══════════════════════════════════════════════════════════════════════════════
+function RenewProModal({ gymInfo, amount, onRenewed, onClose }) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function pay() {
+    setLoading(true); setError("");
+    try {
+      await loadRazorpayScript();
+      const order = await apiFetch(`/gym/${gymInfo.gym_id}/pro-activation/create-order`, { method: "POST" });
+
+      const rzp = new window.Razorpay({
+        key: order.key_id,
+        amount: order.amount,
+        currency: order.currency,
+        name: order.name,
+        description: order.description,
+        order_id: order.order_id,
+        prefill: { email: order.prefill_email, name: order.prefill_name },
+        theme: { color: "#0F6E56" },
+        handler: async function (response) {
+          try {
+            const res = await apiFetch(`/gym/${gymInfo.gym_id}/pro-activation/verify-payment`, {
+              method: "POST",
+              body: JSON.stringify({
+                razorpay_order_id:   response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature:  response.razorpay_signature,
+              }),
+            });
+            onRenewed(res.expires_at);
+          } catch (e) {
+            setError("Payment succeeded but verification failed. Contact Aerofit support with payment ID " + response.razorpay_payment_id);
+          } finally {
+            setLoading(false);
+          }
+        },
+        modal: { ondismiss: function () { setLoading(false); } },
+      });
+      rzp.open();
+    } catch (e) {
+      setError(e.message || "Could not start payment");
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, fontFamily: "'DM Sans', system-ui, sans-serif" }}
+      onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{ background: T.surface, borderRadius: 18, width: 420, maxWidth: "94vw", border: `0.5px solid ${T.border}`, overflow: "hidden", boxShadow: "0 16px 48px rgba(0,0,0,0.14)" }}>
+        <div style={{ padding: "18px 22px", borderBottom: `0.5px solid ${T.border}`, display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 36, height: 36, borderRadius: 10, background: T.purple50, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>👑</div>
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: T.text }}>Renew Pro Plan</div>
+            <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{gymInfo.gym_name}</div>
+          </div>
+          <button onClick={onClose} style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer", fontSize: 16, color: T.textMuted }}>✕</button>
+        </div>
+        <div style={{ padding: 22, display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ background: T.teal50, borderRadius: 10, padding: "12px 14px", fontSize: 13, color: T.teal700, lineHeight: 1.5 }}>
+            Renewing extends your Pro access by <strong>1 year</strong> from your current expiry — no interruption.
+          </div>
+          <div style={{ background: T.bg, borderRadius: 12, padding: "14px 18px", textAlign: "center" }}>
+            <div style={{ fontSize: 26, fontWeight: 700, color: T.teal700 }}>{fmtINR(amount)}</div>
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>Valid for 1 more year</div>
+          </div>
+          {error && <div style={{ fontSize: 12, color: T.red600, background: T.red50, padding: "10px 13px", borderRadius: 8 }}>❌ {error}</div>}
+          <button onClick={pay} disabled={loading} style={{ background: T.teal600, color: "#fff", border: "none", borderRadius: 10, padding: "12px", fontSize: 14, fontWeight: 600, cursor: loading ? "not-allowed" : "pointer", opacity: loading ? 0.7 : 1 }}>
+            {loading ? "Opening payment…" : `💳 Pay ${fmtINR(amount)} & Renew`}
+          </button>
         </div>
       </div>
     </div>
@@ -792,7 +1000,7 @@ function BannersTab({ gymId, onRefresh }) {
   const [confirm, setConfirm]           = useState(null);   // { id, title }
   const [toast, setToast]               = useState(null);   // { message, type }
   const [error, setError]               = useState("");
-  const [form, setForm]                 = useState({ title: "", screen: "home", status: "active", expires_at: "", deep_link: "" });
+  const [form, setForm]                 = useState({ title: "", screen: "home", status: "active", expires_at: "", });
   const [imageB64, setImageB64]         = useState("");
   const [previewUrl, setPreviewUrl]     = useState("");
   const fileRef = useRef();
@@ -817,15 +1025,19 @@ function BannersTab({ gymId, onRefresh }) {
     reader.readAsDataURL(file);
   }
 
+  const BANNER_LIMIT = 3;
+  const limitReached = banners.length >= BANNER_LIMIT;
+
   async function submit() {
     if (!form.title.trim()) { setError("Title is required"); return; }
+    if (limitReached) { setError(`You can only have ${BANNER_LIMIT} banners at a time. Delete one first.`); return; }
     setSubmitting(true); setError("");
     try {
       await apiFetch(`/gym/${gymId}/banners`, {
         method: "POST",
         body: JSON.stringify({ ...form, gym_id: gymId, image_base64: imageB64 || undefined }),
       });
-      setForm({ title: "", screen: "home", status: "active", expires_at: "", deep_link: "" });
+      setForm({ title: "", screen: "home", status: "active", expires_at: ""});
       setImageB64(""); setPreviewUrl(""); setShowForm(false);
       await loadBanners();   // refresh local list
       onRefresh();            // sync dashboard counts
@@ -872,9 +1084,21 @@ function BannersTab({ gymId, onRefresh }) {
       )}
       {toast && <Toast message={toast.message} type={toast.type} onDone={() => setToast(null)} />}
 
-      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
-        <Btn variant="primary" onClick={() => setShowForm(v => !v)}>{showForm ? "✕ Cancel" : "+ New Banner"}</Btn>
-      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+  {limitReached && !showForm && (
+    <div style={{ fontSize: 12, color: T.amber600, background: T.amber50, padding: "6px 12px", borderRadius: 8 }}>
+      Limit reached — {BANNER_LIMIT}/{BANNER_LIMIT} banners. Delete one to add another.
+    </div>
+  )}
+  <Btn
+    variant="primary"
+    onClick={() => setShowForm(v => !v)}
+    disabled={limitReached && !showForm}
+    style={{ marginLeft: "auto" }}
+  >
+    {showForm ? "✕ Cancel" : "+ New Banner"}
+  </Btn>
+</div>
 
       {showForm && (
         <Card style={{ marginBottom: 18 }}>
@@ -895,7 +1119,6 @@ function BannersTab({ gymId, onRefresh }) {
                 </select>
               </div>
             </div>
-            <Input label="Deep link (optional)" value={form.deep_link} onChange={set("deep_link")} placeholder="aerofit://screen/workout" />
             <div>
               <label style={{ fontSize: 12, color: T.textMuted, fontWeight: 500, display: "block", marginBottom: 6 }}>Banner image</label>
               <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
@@ -972,7 +1195,7 @@ function NotificationsTab({ gymId, onRefresh }) {
   const [confirm, setConfirm]             = useState(null);   // { id, title }
   const [toast, setToast]                 = useState(null);   // { message, type }
   const [error, setError]                 = useState("");
-  const [form, setForm]                   = useState({ title: "", body: "", type: "general", deep_link: "" });
+  const [form, setForm]                   = useState({ title: "", body: "", type: "general" });
   const set = k => v => setForm(f => ({ ...f, [k]: v }));
 
   // ── load notifications locally so this tab owns its data ────────────────
@@ -1061,7 +1284,7 @@ function NotificationsTab({ gymId, onRefresh }) {
               <div>
                 <label style={{ fontSize: 12, color: T.textMuted, fontWeight: 500, display: "block", marginBottom: 4 }}>Type</label>
                 <select value={form.type} onChange={e => set("type")(e.target.value)} style={{ border: `0.5px solid ${T.borderMid}`, borderRadius: 8, padding: "8px 11px", fontSize: 13, width: "100%", background: T.bg, color: T.text }}>
-                  {["general", "class", "promo"].map(s => <option key={s}>{s}</option>)}
+                  {["general"].map(s => <option key={s}>{s}</option>)}
                 </select>
               </div>
               <Input label="Deep link" value={form.deep_link} onChange={set("deep_link")} placeholder="aerofit://screen/home" />
@@ -1154,6 +1377,22 @@ export default function AdminDashboard() {
   const [billingSummary, setBillingSummary] = useState(null);
   const [loading, setLoading]             = useState(true);
 
+  // ── Pro plan activation gate state ────────────────────────────────────────
+  // checkingActivation: still waiting on the backend to tell us whether this
+  // gym's ₹5,000/year Pro fee has been paid. activationRequired: true means
+  // render the payment gate instead of the dashboard — no bypass.
+  const [checkingActivation, setCheckingActivation] = useState(true);
+  const [activationRequired, setActivationRequired] = useState(false);
+  const [activationExpired, setActivationExpired]   = useState(false);
+  const [activationAmount, setActivationAmount]     = useState(5000);
+
+  // ── Renewal reminder state (non-blocking, shown when NOT gated) ──────────
+  const [proExpiresAt, setProExpiresAt]         = useState(null);
+  const [proDaysLeft, setProDaysLeft]           = useState(null);
+  const [proExpiringSoon, setProExpiringSoon]   = useState(false);
+  const [renewDismissed, setRenewDismissed]     = useState(false);
+  const [showRenewModal, setShowRenewModal]     = useState(false);
+
   const gymInfo = JSON.parse(sessionStorage.getItem("gym_info") || "{}");
   const gymId   = gymInfo?.gym_id;
 
@@ -1174,9 +1413,55 @@ export default function AdminDashboard() {
     } finally { setLoading(false); }
   }
 
-  useEffect(() => { if (authed) loadAll(); }, [authed]);
+  // Step 1 after login: find out if this gym needs to pay the Pro
+  // activation fee before it can see anything else. Also captures expiry
+  // info for the non-blocking renewal reminder when access IS allowed.
+  useEffect(() => {
+    if (!authed || !gymId) return;
+    setCheckingActivation(true);
+    apiFetch(`/gym/${gymId}/pro-activation-status`)
+      .then(s => {
+        setActivationRequired(!!s.required);
+        setActivationExpired(!!s.expired);
+        if (s.amount) setActivationAmount(s.amount);
+        if (!s.required) {
+          setProExpiresAt(s.expires_at ?? null);
+          setProDaysLeft(typeof s.days_left === "number" ? s.days_left : null);
+          setProExpiringSoon(!!s.expiring_soon);
+        }
+      })
+      .catch(() => setActivationRequired(false))
+      .finally(() => setCheckingActivation(false));
+  }, [authed, gymId]);
+
+  // Step 2: only load the actual dashboard data once we know activation
+  // isn't blocking access.
+  useEffect(() => {
+    if (authed && !checkingActivation && !activationRequired) loadAll();
+  }, [authed, checkingActivation, activationRequired]);
+
+  function handleRenewed(newExpiresAt) {
+    setShowRenewModal(false);
+    setProExpiresAt(newExpiresAt);
+    if (newExpiresAt) {
+      setProDaysLeft(Math.ceil((new Date(newExpiresAt).getTime() - Date.now()) / 86400000));
+    }
+    setProExpiringSoon(false);
+    setRenewDismissed(false);
+  }
 
   if (!authed) return <AdminLogin onLogin={() => setAuthed(true)} />;
+  if (checkingActivation) return <FullScreenSpinner />;
+  if (activationRequired) {
+    return (
+      <ProActivationGate
+        gymInfo={gymInfo}
+        amount={activationAmount}
+        expired={activationExpired}
+        onActivated={() => setActivationRequired(false)}
+      />
+    );
+  }
 
   const currentLabel = NAV.find(n => n.id === active)?.label || "";
 
@@ -1263,10 +1548,26 @@ export default function AdminDashboard() {
           <div style={{ fontSize: 15, fontWeight: 500, color: T.text }}>{currentLabel}</div>
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={loadAll} style={{ width: 34, height: 34, borderRadius: 8, border: `0.5px solid ${T.border}`, background: "none", cursor: "pointer", fontSize: 15 }} title="Refresh">🔄</button>
-            <button onClick={() => { sessionStorage.removeItem("af_admin"); sessionStorage.removeItem("gym_info"); setAuthed(false); }} style={{ height: 34, borderRadius: 8, border: `0.5px solid ${T.border}`, background: "none", cursor: "pointer", fontSize: 12, color: T.textMuted, padding: "0 12px" }}>Sign out</button>
+            <button onClick={() => { sessionStorage.removeItem("af_admin"); sessionStorage.removeItem("gym_info"); setAuthed(false); setCheckingActivation(true); setActivationRequired(false); }} style={{ height: 34, borderRadius: 8, border: `0.5px solid ${T.border}`, background: "none", cursor: "pointer", fontSize: 12, color: T.textMuted, padding: "0 12px" }}>Sign out</button>
           </div>
         </div>
         <div style={{ padding: 24, maxWidth: 1100 }}>
+          {showRenewModal && (
+            <RenewProModal
+              gymInfo={gymInfo}
+              amount={activationAmount}
+              onRenewed={handleRenewed}
+              onClose={() => setShowRenewModal(false)}
+            />
+          )}
+          {!activationRequired && proExpiringSoon && !renewDismissed && (
+            <RenewalReminderBanner
+              daysLeft={proDaysLeft ?? 0}
+              expiresAt={proExpiresAt}
+              onRenew={() => setShowRenewModal(true)}
+              onDismiss={() => setRenewDismissed(true)}
+            />
+          )}
           {loading ? <Spinner /> : (
             <>
               {active === "dashboard"     && <DashboardTab banners={banners} notifications={notifications} userIds={userIds} billingSummary={billingSummary} />}

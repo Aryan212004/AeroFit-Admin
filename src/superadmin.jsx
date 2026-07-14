@@ -37,7 +37,6 @@ const T = {
 function Badge({ label }) {
   const MAP = {
     Pro:      { bg: T.purple50, color: T.purple600 },
-    Starter:  { bg: T.blue50,   color: T.blue600   },
     Trial:    { bg: T.amber50,  color: T.amber600  },
     active:   { bg: T.teal50,   color: T.teal600   },
     trial:    { bg: T.amber50,  color: T.amber600  },
@@ -115,6 +114,19 @@ function fmtDate(v) {
 
 function fmtINR(v) {
   return "₹" + Number(v || 0).toLocaleString("en-IN", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+}
+
+// ── Trial countdown helper ──────────────────────────────────────────────────
+// Trial gyms carry a trial_expires_at (set by the backend at creation, 14
+// days out). The hourly backend expiry job auto-deletes any gym still in
+// status:"trial" once that timestamp passes — this just renders how much
+// time is left, purely for display.
+function trialDaysLeft(expiresAt) {
+  if (!expiresAt) return null;
+  const diff = new Date(expiresAt).getTime() - Date.now();
+  if (diff <= 0) return { label: "Expiring…", urgent: true };
+  const days = Math.ceil(diff / 86400000);
+  return { label: `${days}d left`, urgent: days <= 3 };
 }
 
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
@@ -324,7 +336,7 @@ function CredentialModal({ data, onClose }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  ADD GYM MODAL (Simplified - No Pricing)
+//  ADD GYM MODAL (Simplified - No Pricing, No Starter)
 // ══════════════════════════════════════════════════════════════════════════════
 function AddGymModal({ onCreated, onClose }) {
   const [form, setForm] = useState({ name: "", city: "", plan: "Pro", admin_name: "", admin_email: "", admin_password: "" });
@@ -375,7 +387,7 @@ function AddGymModal({ onCreated, onClose }) {
               <div>
                 <label style={{ fontSize: 12, color: T.textMuted, fontWeight: 500, display: "block", marginBottom: 8 }}>Plan</label>
                 <div style={{ display: "flex", gap: 8 }}>
-                  {["Starter", "Pro", "Trial"].map(p => (
+                  {["Pro", "Trial"].map(p => (
                     <button key={p} onClick={() => set("plan")(p)} style={{ flex: 1, padding: "9px 8px", borderRadius: 9, cursor: "pointer", fontSize: 13, fontWeight: 500, border: form.plan === p ? `1.5px solid ${T.teal600}` : `0.5px solid ${T.borderMid}`, background: form.plan === p ? T.teal50 : T.bg, color: form.plan === p ? T.teal600 : T.textMid }}>{p}</button>
                   ))}
                 </div>
@@ -384,10 +396,16 @@ function AddGymModal({ onCreated, onClose }) {
           </div>
           <div style={{ height: "0.5px", background: T.border }} />
           <div>
-            <div style={{ background: T.blue50, borderRadius: 10, padding: "12px 14px", fontSize: 12, color: T.blue600, display: "flex", gap: 8, marginBottom: 12 }}>
+            <div style={{ background: T.blue50, borderRadius: 10, padding: "12px 14px", fontSize: 12, color: T.blue600, display: "flex", gap: 8, marginBottom: form.plan === "Trial" ? 12 : 0 }}>
               <span>ℹ️</span>
-              <span><strong>Aerofit charges ₹40 per user per month.</strong> The gym admin will set their own pricing when they set up User IDs.</span>
+              <span><strong>Aerofit charges ₹33 per user per month.</strong> The gym admin will set their own pricing when they set up User IDs.</span>
             </div>
+            {form.plan === "Trial" && (
+              <div style={{ background: T.amber50, borderRadius: 10, padding: "12px 14px", fontSize: 12, color: T.amber600, display: "flex", gap: 8 }}>
+                <span>⏳</span>
+                <span><strong>Trial gyms get 14 days of access.</strong> If not upgraded to Pro before then, the gym and all its data — members, invoices, banners, notifications, everything — will be permanently and automatically deleted.</span>
+              </div>
+            )}
           </div>
           <div style={{ height: "0.5px", background: T.border }} />
           <div>
@@ -419,12 +437,60 @@ function AddGymModal({ onCreated, onClose }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  INVOICE MODAL
+//  UPGRADE TO PRO MODAL (converts a Trial gym → Pro, clears the auto-delete risk)
 // ══════════════════════════════════════════════════════════════════════════════
+function UpgradeGymModal({ gym, onUpgraded, onClose }) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function upgrade() {
+    setLoading(true); setError("");
+    try {
+      // Flipping status to "active" is what matters — the backend's hourly
+      // expiry job only ever targets gyms with status:"trial", so once this
+      // lands the gym is permanently safe from auto-deletion regardless of
+      // whatever trial_expires_at is still sitting in the document.
+      await apiFetch(`/alpha/gyms/${gym.gym_id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ plan: "Pro", status: "active" }),
+      });
+      onUpgraded();
+    } catch (e) {
+      setError(e.message || "Failed to upgrade gym");
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, fontFamily: "'DM Sans', system-ui, sans-serif" }}
+      onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{ background: T.surface, borderRadius: 18, width: 440, maxWidth: "95vw", border: `0.5px solid ${T.border}`, overflow: "hidden", boxShadow: "0 16px 48px rgba(0,0,0,0.14)" }}>
+        <div style={{ padding: "18px 22px", borderBottom: `0.5px solid ${T.border}`, display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 36, height: 36, borderRadius: 10, background: T.purple50, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>👑</div>
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: T.text }}>Upgrade to Pro</div>
+            <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{gym.name}</div>
+          </div>
+        </div>
+        <div style={{ padding: 22, display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ background: T.teal50, borderRadius: 10, padding: "12px 14px", fontSize: 13, color: T.teal700, lineHeight: 1.5 }}>
+            This moves <strong>{gym.name}</strong> from Trial to Pro and cancels the 14-day auto-delete. Members, invoices, and all data stay exactly as they are.
+          </div>
+          {error && <div style={{ fontSize: 12, color: T.red600, background: T.red50, padding: "10px 13px", borderRadius: 8 }}>❌ {error}</div>}
+          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+            <Btn variant="ghost" onClick={onClose} disabled={loading}>Cancel</Btn>
+            <Btn variant="primary" onClick={upgrade} disabled={loading} style={{ padding: "8px 20px" }}>{loading ? "Upgrading…" : "Upgrade to Pro"}</Btn>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
-//  INVOICE MODAL  (auto-calculated: members × ₹40, editable before sending)
+//  INVOICE MODAL  (auto-calculated: members × ₹33, editable before sending)
 // ══════════════════════════════════════════════════════════════════════════════
-const AEROFIT_FEE = 40;
+const AEROFIT_FEE = 33;
 
 function CreateInvoiceModal({ gyms, onCreated, onClose }) {
   const [gymId, setGymId] = useState("");
@@ -435,7 +501,7 @@ function CreateInvoiceModal({ gyms, onCreated, onClose }) {
   const [memberCount, setMemberCount] = useState(0);
   const [fetchingMembers, setFetchingMembers] = useState(false);
 
-  // gross is the editable total. autoGross is what we'd compute from members × ₹40.
+  // gross is the editable total. autoGross is what we'd compute from members × ₹33.
   // We track whether the admin has manually touched the field so we know whether
   // to send an override to the backend or let it auto-calculate again server-side.
   const [gross, setGross] = useState(0);
@@ -633,7 +699,7 @@ function BillingTab({ gyms, stats, onRefresh }) {
   const [updating, setUpdating] = useState(null);
   const [successMsg, setSuccessMsg] = useState("");
 
-  const AEROFIT_FEE_PER_USER = 40;
+  const AEROFIT_FEE_PER_USER = 33;
 
   async function loadInvoices() {
     setLoading(true);
@@ -683,7 +749,7 @@ function BillingTab({ gyms, stats, onRefresh }) {
       )}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 20 }}>
         {[
-          { label: "Aerofit Earned",  value: fmtINR(totalAerofit), sub: "from paid invoices (₹40 per user)", bg: T.purple50, color: T.purple600, icon: "👑" },
+          { label: "Aerofit Earned",  value: fmtINR(totalAerofit), sub: "from paid invoices (₹33 per user)", bg: T.purple50, color: T.purple600, icon: "👑" },
           { label: "Pending",         value: fmtINR(totalPending),  sub: `${invoices.filter(i=>i.status==="pending").length} invoices`, bg: T.amber50,  color: T.amber600,  icon: "⏳" },
           { label: "Overdue",         value: fmtINR(totalOverdue),  sub: `${invoices.filter(i=>i.status==="overdue").length} invoices`, bg: T.red50,    color: T.red600,    icon: "🚨" },
           { label: "Total Invoiced",  value: fmtINR(totalGross),    sub: `${invoices.length} total`,          bg: T.blue50,   color: T.blue600,   icon: "📄" },
@@ -761,12 +827,12 @@ function BillingTab({ gyms, stats, onRefresh }) {
 // ══════════════════════════════════════════════════════════════════════════════
 function DashboardTab({ stats, gyms, onAddGym }) {
   if (!stats) return <Spinner />;
-  const AEROFIT_FEE = 40;
+  const AEROFIT_FEE = 33;
   const aerofitEarnings = stats.total_members * AEROFIT_FEE; // Potential earnings from all members
   const statCards = [
     { label: "Total Gyms",           value: stats.total_gyms,           sub: `${stats.active_gyms} active`,                   bg: T.teal50,   icon: "🏢" },
     { label: "Total Members",        value: stats.total_members,        sub: "across all gyms",                              bg: T.blue50,   icon: "👥" },
-    { label: "Aerofit Earnings",     value: fmtINR(aerofitEarnings),   sub: "₹40 per member per month",                     bg: T.purple50, icon: "👑" },
+    { label: "Aerofit Earnings",     value: fmtINR(aerofitEarnings),   sub: "₹33 per member per month",                     bg: T.purple50, icon: "👑" },
     { label: "Outstanding Amount",   value: fmtINR(stats.pending_amount || 0), sub: `${(stats.pending_invoices||0)+(stats.overdue_invoices||0)} invoices`, bg: T.amber50,  icon: "⏳" },
   ];
   const top5 = [...gyms].sort((a, b) => (b.members || 0) - (a.members || 0)).slice(0, 5);
@@ -790,7 +856,7 @@ function DashboardTab({ stats, gyms, onAddGym }) {
       )}
       {stats.trial_gyms > 0 && (
         <div style={{ background: T.amber50, border: `0.5px solid #f0c070`, borderRadius: 10, padding: "10px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 10, fontSize: 13, color: T.amber600 }}>
-          ⚠️ <strong>{stats.trial_gyms} gym{stats.trial_gyms > 1 ? "s" : ""}</strong> on trial — convert to paid plan.
+          ⚠️ <strong>{stats.trial_gyms} gym{stats.trial_gyms > 1 ? "s" : ""}</strong> on trial — convert to Pro before the 14-day window ends or they'll be auto-deleted.
         </div>
       )}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
@@ -832,7 +898,7 @@ function DashboardTab({ stats, gyms, onAddGym }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  GYMS TAB (Simplified - No Pricing Edit)
+//  GYMS TAB (Simplified - No Pricing Edit, No Starter, Trial Countdown + Upgrade)
 // ══════════════════════════════════════════════════════════════════════════════
 function GymsTab({ gyms, onRefresh }) {
   const [showAdd, setShowAdd]           = useState(false);
@@ -840,6 +906,7 @@ function GymsTab({ gyms, onRefresh }) {
   const [search, setSearch]             = useState("");
   const [planFilter, setPlanFilter]     = useState("all");
   const [deleteTarget, setDeleteTarget] = useState(null);
+  const [upgradeTarget, setUpgradeTarget] = useState(null);
   const [successMsg, setSuccessMsg]     = useState("");
 
   function handleCreated(cred) { setShowAdd(false); setCredential(cred); onRefresh(); }
@@ -853,6 +920,17 @@ function GymsTab({ gyms, onRefresh }) {
     <div>
       {showAdd && <AddGymModal onCreated={handleCreated} onClose={() => setShowAdd(false)} />}
       {credential && <CredentialModal data={credential} onClose={() => setCredential(null)} />}
+      {upgradeTarget && (
+        <UpgradeGymModal
+          gym={upgradeTarget}
+          onUpgraded={() => {
+            setUpgradeTarget(null); onRefresh();
+            setSuccessMsg(`"${upgradeTarget.name}" has been upgraded to Pro.`);
+            setTimeout(() => setSuccessMsg(""), 4000);
+          }}
+          onClose={() => setUpgradeTarget(null)}
+        />
+      )}
       {deleteTarget && (
         <DeleteGymModal
           gym={deleteTarget}
@@ -876,7 +954,7 @@ function GymsTab({ gyms, onRefresh }) {
             style={{ width: "100%", boxSizing: "border-box", border: `0.5px solid ${T.borderMid}`, borderRadius: 8, padding: "8px 10px 8px 30px", fontSize: 13, background: T.surface, color: T.text, outline: "none" }} />
         </div>
         <div style={{ display: "flex", gap: 6 }}>
-          {["all", "Pro", "Starter", "Trial"].map(p => (
+          {["all", "Pro", "Trial"].map(p => (
             <button key={p} onClick={() => setPlanFilter(p)} style={{ padding: "7px 13px", borderRadius: 8, cursor: "pointer", fontSize: 12.5, fontWeight: 500, border: planFilter === p ? `1.5px solid ${T.teal600}` : `0.5px solid ${T.borderMid}`, background: planFilter === p ? T.teal50 : T.surface, color: planFilter === p ? T.teal600 : T.textMid }}>{p === "all" ? "All Plans" : p}</button>
           ))}
         </div>
@@ -893,24 +971,40 @@ function GymsTab({ gyms, onRefresh }) {
                 ))}</tr>
               </thead>
               <tbody>
-                {filtered.map((g, i) => (
-                  <tr key={g.gym_id} style={{ borderBottom: `0.5px solid ${T.border}` }}>
-                    <td style={{ padding: "11px 14px" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                        <div style={{ width: 32, height: 32, borderRadius: 8, flexShrink: 0, background: [T.teal50, T.purple50, T.blue50, T.amber50, T.coral50][i % 5], color: [T.teal600, T.purple600, T.blue600, T.amber600, T.coral600][i % 5], display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 13 }}>{g.name?.[0] || "?"}</div>
-                        <span style={{ fontWeight: 500, color: T.text }}>{g.name}</span>
-                      </div>
-                    </td>
-                    <td style={{ padding: "11px 14px", color: T.textMuted }}>{g.city}</td>
-                    <td style={{ padding: "11px 14px" }}><Badge label={g.plan} /></td>
-                    <td style={{ padding: "11px 14px" }}><Badge label={g.status === "active" ? "Active" : "Trial"} /></td>
-                    <td style={{ padding: "11px 14px", fontWeight: 500 }}>{g.members || 0}</td>
-                    <td style={{ padding: "11px 14px", color: T.textMuted, fontSize: 12 }}>{g.admin_email}</td>
-                    <td style={{ padding: "11px 14px" }}>
-                      <Btn variant="danger" onClick={() => setDeleteTarget(g)} style={{ fontSize: 11.5, padding: "4px 10px" }}>🗑️ Delete</Btn>
-                    </td>
-                  </tr>
-                ))}
+                {filtered.map((g, i) => {
+                  const isTrial   = g.status === "trial";
+                  const countdown = isTrial ? trialDaysLeft(g.trial_expires_at) : null;
+                  return (
+                    <tr key={g.gym_id} style={{ borderBottom: `0.5px solid ${T.border}` }}>
+                      <td style={{ padding: "11px 14px" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                          <div style={{ width: 32, height: 32, borderRadius: 8, flexShrink: 0, background: [T.teal50, T.purple50, T.blue50, T.amber50, T.coral50][i % 5], color: [T.teal600, T.purple600, T.blue600, T.amber600, T.coral600][i % 5], display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 13 }}>{g.name?.[0] || "?"}</div>
+                          <span style={{ fontWeight: 500, color: T.text }}>{g.name}</span>
+                        </div>
+                      </td>
+                      <td style={{ padding: "11px 14px", color: T.textMuted }}>{g.city}</td>
+                      <td style={{ padding: "11px 14px" }}><Badge label={g.plan} /></td>
+                      <td style={{ padding: "11px 14px" }}>
+                        <Badge label={isTrial ? "Trial" : "Active"} />
+                        {isTrial && countdown && (
+                          <div style={{ fontSize: 10.5, marginTop: 3, fontWeight: 600, color: countdown.urgent ? T.red600 : T.amber600 }}>
+                            {countdown.urgent ? "⏰ " : ""}{countdown.label}
+                          </div>
+                        )}
+                      </td>
+                      <td style={{ padding: "11px 14px", fontWeight: 500 }}>{g.members || 0}</td>
+                      <td style={{ padding: "11px 14px", color: T.textMuted, fontSize: 12 }}>{g.admin_email}</td>
+                      <td style={{ padding: "11px 14px" }}>
+                        <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                          {isTrial && (
+                            <Btn variant="purple" onClick={() => setUpgradeTarget(g)} style={{ fontSize: 11.5, padding: "4px 10px" }}>👑 Upgrade</Btn>
+                          )}
+                          <Btn variant="danger" onClick={() => setDeleteTarget(g)} style={{ fontSize: 11.5, padding: "4px 10px" }}>🗑️ Delete</Btn>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
