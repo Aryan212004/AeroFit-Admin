@@ -398,7 +398,7 @@ function AddGymModal({ onCreated, onClose }) {
           <div>
             <div style={{ background: T.blue50, borderRadius: 10, padding: "12px 14px", fontSize: 12, color: T.blue600, display: "flex", gap: 8, marginBottom: form.plan === "Trial" ? 12 : 0 }}>
               <span>ℹ️</span>
-              <span><strong>Aerofit charges ₹33 per user per month.</strong> The gym admin will set their own pricing when they set up User IDs.</span>
+              <span><strong>Aerofit charges ₹35 per user per month.</strong> The gym admin will set their own pricing when they set up User IDs.</span>
             </div>
             {form.plan === "Trial" && (
               <div style={{ background: T.amber50, borderRadius: 10, padding: "12px 14px", fontSize: 12, color: T.amber600, display: "flex", gap: 8 }}>
@@ -488,9 +488,9 @@ function UpgradeGymModal({ gym, onUpgraded, onClose }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  INVOICE MODAL  (auto-calculated: members × ₹33, editable before sending)
+//  INVOICE MODAL  (auto-calculated: members × ₹35, editable before sending)
 // ══════════════════════════════════════════════════════════════════════════════
-const AEROFIT_FEE = 33;
+const AEROFIT_FEE = 35;
 
 function CreateInvoiceModal({ gyms, onCreated, onClose }) {
   const [gymId, setGymId] = useState("");
@@ -501,7 +501,7 @@ function CreateInvoiceModal({ gyms, onCreated, onClose }) {
   const [memberCount, setMemberCount] = useState(0);
   const [fetchingMembers, setFetchingMembers] = useState(false);
 
-  // gross is the editable total. autoGross is what we'd compute from members × ₹33.
+  // gross is the editable total. autoGross is what we'd compute from members × ₹35.
   // We track whether the admin has manually touched the field so we know whether
   // to send an override to the backend or let it auto-calculate again server-side.
   const [gross, setGross] = useState(0);
@@ -699,7 +699,7 @@ function BillingTab({ gyms, stats, onRefresh }) {
   const [updating, setUpdating] = useState(null);
   const [successMsg, setSuccessMsg] = useState("");
 
-  const AEROFIT_FEE_PER_USER = 33;
+  const AEROFIT_FEE_PER_USER = 35;
 
   async function loadInvoices() {
     setLoading(true);
@@ -749,7 +749,7 @@ function BillingTab({ gyms, stats, onRefresh }) {
       )}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 20 }}>
         {[
-          { label: "Aerofit Earned",  value: fmtINR(totalAerofit), sub: "from paid invoices (₹33 per user)", bg: T.purple50, color: T.purple600, icon: "👑" },
+          { label: "Aerofit Earned",  value: fmtINR(totalAerofit), sub: "from paid invoices (₹35 per user)", bg: T.purple50, color: T.purple600, icon: "👑" },
           { label: "Pending",         value: fmtINR(totalPending),  sub: `${invoices.filter(i=>i.status==="pending").length} invoices`, bg: T.amber50,  color: T.amber600,  icon: "⏳" },
           { label: "Overdue",         value: fmtINR(totalOverdue),  sub: `${invoices.filter(i=>i.status==="overdue").length} invoices`, bg: T.red50,    color: T.red600,    icon: "🚨" },
           { label: "Total Invoiced",  value: fmtINR(totalGross),    sub: `${invoices.length} total`,          bg: T.blue50,   color: T.blue600,   icon: "📄" },
@@ -827,12 +827,12 @@ function BillingTab({ gyms, stats, onRefresh }) {
 // ══════════════════════════════════════════════════════════════════════════════
 function DashboardTab({ stats, gyms, onAddGym }) {
   if (!stats) return <Spinner />;
-  const AEROFIT_FEE = 33;
+  const AEROFIT_FEE = 35;
   const aerofitEarnings = stats.total_members * AEROFIT_FEE; // Potential earnings from all members
   const statCards = [
     { label: "Total Gyms",           value: stats.total_gyms,           sub: `${stats.active_gyms} active`,                   bg: T.teal50,   icon: "🏢" },
     { label: "Total Members",        value: stats.total_members,        sub: "across all gyms",                              bg: T.blue50,   icon: "👥" },
-    { label: "Aerofit Earnings",     value: fmtINR(aerofitEarnings),   sub: "₹33 per member per month",                     bg: T.purple50, icon: "👑" },
+    { label: "Aerofit Earnings",     value: fmtINR(aerofitEarnings),   sub: "₹35 per member per month",                     bg: T.purple50, icon: "👑" },
     { label: "Outstanding Amount",   value: fmtINR(stats.pending_amount || 0), sub: `${(stats.pending_invoices||0)+(stats.overdue_invoices||0)} invoices`, bg: T.amber50,  icon: "⏳" },
   ];
   const top5 = [...gyms].sort((a, b) => (b.members || 0) - (a.members || 0)).slice(0, 5);
