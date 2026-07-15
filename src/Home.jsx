@@ -531,7 +531,7 @@ export default function Home() {
           <div className="af-cta-sub">Join Aerofit and bring your workouts, meals and progress into one place.</div>
           <div className="af-cta-row">
             <a className="af-btn-primary" href={APP_STORE_URL} target="_blank" rel="noopener noreferrer">Get the app</a>
-            <a className="af-btn-secondary" href="mailto:gerathiaryan@gmail.com">Talk to us</a>
+            <a className="af-btn-secondary" href="mailto:aerofityou@gmail.com">Talk to us</a>
           </div>
         </div>
       </section>
