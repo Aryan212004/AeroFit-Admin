@@ -1,4 +1,4 @@
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
+import { HashRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
 import Home from './Home'
 import ConsoleSelector from './ConsoleSelector'
 import SuperAdminDashboard from './superadmin'
