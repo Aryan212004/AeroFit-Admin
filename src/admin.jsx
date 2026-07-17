@@ -20,8 +20,6 @@ async function apiFetch(path, opts = {}) {
 }
 
 // ── Razorpay checkout script loader ───────────────────────────────────────────
-// Loads the Razorpay widget script once and caches the promise so multiple
-// "Pay Now" clicks don't inject the <script> tag more than once.
 let _razorpayScriptPromise = null;
 function loadRazorpayScript() {
   if (window.Razorpay) return Promise.resolve(true);
@@ -50,7 +48,6 @@ const T = {
   text: "#1A1A18", textMid: "#444441", textMuted: "#888780",
 };
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
 function fmtDate(v) {
   if (!v) return "—";
   try {
@@ -76,7 +73,6 @@ function expiryCountdown(expiresAt) {
   return { label: "< 1h left", urgent: true };
 }
 
-// ── Confirm Dialog ────────────────────────────────────────────────────────────
 function ConfirmDialog({ message, onConfirm, onCancel }) {
   return (
     <div style={{
@@ -104,7 +100,6 @@ function ConfirmDialog({ message, onConfirm, onCancel }) {
   );
 }
 
-// ── Toast ─────────────────────────────────────────────────────────────────────
 function Toast({ message, type = "success", onDone }) {
   useEffect(() => {
     const t = setTimeout(onDone, 3000);
@@ -125,7 +120,6 @@ function Toast({ message, type = "success", onDone }) {
   );
 }
 
-// ── UI Primitives ─────────────────────────────────────────────────────────────
 function Badge({ label }) {
   const MAP = {
     Active:    { bg: T.teal50,   color: T.teal600   },
@@ -219,7 +213,6 @@ const NAV = [
 ];
 const SECTIONS = [...new Set(NAV.map(n => n.section))];
 
-// ── Login ─────────────────────────────────────────────────────────────────────
 function AdminLogin({ onLogin }) {
   const [email, setEmail] = useState("");
   const [pass, setPass]   = useState("");
@@ -269,12 +262,6 @@ function AdminLogin({ onLogin }) {
   );
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  PRO PLAN ACTIVATION GATE
-//  Shown in place of the entire dashboard when a Pro-plan gym's admin has
-//  not yet paid the ₹5,000/year activation fee (or it has lapsed). Blocks
-//  everything until payment clears — no bypass.
-// ══════════════════════════════════════════════════════════════════════════════
 function ProActivationGate({ gymInfo, amount, expired, onActivated }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -359,12 +346,6 @@ function ProActivationGate({ gymInfo, amount, expired, onActivated }) {
   );
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  RENEWAL REMINDER BANNER
-//  Non-blocking — shown on every tab once the Pro fee is within 15 days of
-//  expiry, turning red inside the last 5 days. Dismissible per-session so it
-//  doesn't nag on every click, but reappears on next login until renewed.
-// ══════════════════════════════════════════════════════════════════════════════
 function RenewalReminderBanner({ daysLeft, expiresAt, onRenew, onDismiss }) {
   const urgent = daysLeft <= 5;
   return (
@@ -388,11 +369,6 @@ function RenewalReminderBanner({ daysLeft, expiresAt, onRenew, onDismiss }) {
   );
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  RENEW PRO PLAN MODAL
-//  Non-blocking version of ProActivationGate — opened from the reminder
-//  banner so the admin can renew early without losing dashboard access.
-// ══════════════════════════════════════════════════════════════════════════════
 function RenewProModal({ gymInfo, amount, onRenewed, onClose }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -468,11 +444,10 @@ function RenewProModal({ gymInfo, amount, onRenewed, onClose }) {
   );
 }
 
-// ── Dashboard Tab ─────────────────────────────────────────────────────────────
 function DashboardTab({ banners, notifications, userIds, billingSummary }) {
   const activeIds = userIds.filter(u => u.status === "active").length;
   const usedIds   = userIds.filter(u => u.status === "used").length;
-  const totalMembers = usedIds; // members currently registered to this gym (consumed User IDs)
+  const totalMembers = usedIds;
 
   const expiringCount = userIds.filter(u => {
     if (u.status !== "used" || !u.expires_at) return false;
@@ -577,8 +552,8 @@ function BillingTab({ gymId, onRefresh }) {
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState("");
   const [statusFilter, setFilter] = useState("all");
-  const [payingId, setPayingId]   = useState(null);   // invoice_id currently in checkout
-  const [toast, setToast]         = useState(null);    // { message, type }
+  const [payingId, setPayingId]   = useState(null);
+  const [toast, setToast]         = useState(null);
 
   async function load() {
     if (!gymId) return;
@@ -624,8 +599,7 @@ function BillingTab({ gymId, onRefresh }) {
             });
             setToast({ message: `Payment received for ${inv.invoice_number}!`, type: "success" });
             await load();
-            onRefresh?.();   // sync the sidebar badge's pending-invoice count now that
-                             // this one is paid — same pattern Banners/Notifications use.
+            onRefresh?.();
           } catch (e) {
             setToast({ message: "Payment succeeded but verification failed. Contact support with payment ID " + response.razorpay_payment_id, type: "error" });
           } finally {
@@ -654,20 +628,24 @@ function BillingTab({ gymId, onRefresh }) {
       )}
 
       {summary && (
-        <>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 18 }}>
-            {[
-              { label: "Pending",             value: fmtINR(summary.total_pending),      sub: `${summary.pending_count} invoice(s)`, icon: "⏳", accent: T.amber50, color: T.amber600 },
-            ].map(s => (
-              <div key={s.label} style={{ background: T.surface, border: `0.5px solid ${T.border}`, borderRadius: 12, padding: "14px 16px" }}>
-                <div style={{ width: 34, height: 34, borderRadius: 8, background: s.accent, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 17, marginBottom: 10 }}>{s.icon}</div>
-                <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 4 }}>{s.label}</div>
-                <div style={{ fontSize: 20, fontWeight: 600, color: s.color }}>{s.value}</div>
-                <div style={{ fontSize: 11, marginTop: 3, color: T.textMuted }}>{s.sub}</div>
-              </div>
-            ))}
-          </div>
-        </>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 18 }}>
+          {[
+            { label: "Pending", value: fmtINR(summary.total_pending), sub: `${summary.pending_count} invoice(s)`, icon: "⏳", accent: T.amber50, color: T.amber600 },
+            ...(summary.next_billing_date ? [{
+              label: "Next Monthly Invoice",
+              value: fmtDate(summary.next_billing_date),
+              sub: "auto-generated 2 days prior",
+              icon: "📅", accent: T.blue50, color: T.blue600,
+            }] : []),
+          ].map(s => (
+            <div key={s.label} style={{ background: T.surface, border: `0.5px solid ${T.border}`, borderRadius: 12, padding: "14px 16px" }}>
+              <div style={{ width: 34, height: 34, borderRadius: 8, background: s.accent, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 17, marginBottom: 10 }}>{s.icon}</div>
+              <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 4 }}>{s.label}</div>
+              <div style={{ fontSize: 20, fontWeight: 600, color: s.color }}>{s.value}</div>
+              <div style={{ fontSize: 11, marginTop: 3, color: T.textMuted }}>{s.sub}</div>
+            </div>
+          ))}
+        </div>
       )}
 
       <div style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "center", flexWrap: "wrap" }}>
@@ -721,7 +699,6 @@ function BillingTab({ gymId, onRefresh }) {
   );
 }
 
-// ── Billing Notifications ─────────────────────────────────────────────────────
 function BillingNotifications({ gymId }) {
   const [notes, setNotes]     = useState([]);
   const [loading, setLoading] = useState(true);
@@ -996,9 +973,9 @@ function BannersTab({ gymId, onRefresh }) {
   const [loading, setLoading]           = useState(true);
   const [showForm, setShowForm]         = useState(false);
   const [submitting, setSubmitting]     = useState(false);
-  const [deletingId, setDeletingId]     = useState(null);   // banner_id being deleted
-  const [confirm, setConfirm]           = useState(null);   // { id, title }
-  const [toast, setToast]               = useState(null);   // { message, type }
+  const [deletingId, setDeletingId]     = useState(null);
+  const [confirm, setConfirm]           = useState(null);
+  const [toast, setToast]               = useState(null);
   const [error, setError]               = useState("");
   const [form, setForm]                 = useState({ title: "", screen: "home", status: "active", expires_at: "", });
   const [imageB64, setImageB64]         = useState("");
@@ -1006,7 +983,6 @@ function BannersTab({ gymId, onRefresh }) {
   const fileRef = useRef();
   const set = k => v => setForm(f => ({ ...f, [k]: v }));
 
-  // ── load banners locally so this tab owns its data ──────────────────────
   async function loadBanners() {
     setLoading(true);
     try {
@@ -1039,33 +1015,29 @@ function BannersTab({ gymId, onRefresh }) {
       });
       setForm({ title: "", screen: "home", status: "active", expires_at: ""});
       setImageB64(""); setPreviewUrl(""); setShowForm(false);
-      await loadBanners();   // refresh local list
-      onRefresh();            // sync dashboard counts
+      await loadBanners();
+      onRefresh();
       setToast({ message: "Banner created", type: "success" });
     } catch (e) { setError(e.message); }
     finally { setSubmitting(false); }
   }
 
-  // ── Step 1: show confirm dialog ──────────────────────────────────────────
   function askDelete(banner) {
     setConfirm({ id: banner.banner_id, title: banner.title });
   }
 
-  // ── Step 2: confirmed — call API, optimistically remove, then sync ───────
   async function confirmDelete() {
     const { id, title } = confirm;
     setConfirm(null);
     setDeletingId(id);
 
-    // Optimistic removal — instant visual feedback
     setBanners(prev => prev.filter(b => b.banner_id !== id));
 
     try {
       await apiFetch(`/gym/${gymId}/banners/${id}`, { method: "DELETE" });
       setToast({ message: `"${title}" deleted`, type: "success" });
-      onRefresh();   // sync dashboard banner count
+      onRefresh();
     } catch (e) {
-      // Rollback: re-fetch on failure
       await loadBanners();
       setToast({ message: `Delete failed: ${e.message}`, type: "error" });
     } finally {
@@ -1191,14 +1163,13 @@ function NotificationsTab({ gymId, onRefresh }) {
   const [loading, setLoading]             = useState(true);
   const [showForm, setShowForm]           = useState(false);
   const [submitting, setSubmitting]       = useState(false);
-  const [deletingId, setDeletingId]       = useState(null);   // notification_id being deleted
-  const [confirm, setConfirm]             = useState(null);   // { id, title }
-  const [toast, setToast]                 = useState(null);   // { message, type }
+  const [deletingId, setDeletingId]       = useState(null);
+  const [confirm, setConfirm]             = useState(null);
+  const [toast, setToast]                 = useState(null);
   const [error, setError]                 = useState("");
   const [form, setForm]                   = useState({ title: "", body: "", type: "general" });
   const set = k => v => setForm(f => ({ ...f, [k]: v }));
 
-  // ── load notifications locally so this tab owns its data ────────────────
   async function loadNotifications() {
     setLoading(true);
     try {
@@ -1221,33 +1192,29 @@ function NotificationsTab({ gymId, onRefresh }) {
       });
       setForm({ title: "", body: "", type: "general", deep_link: "" });
       setShowForm(false);
-      await loadNotifications();   // refresh local list
-      onRefresh();                  // sync dashboard counts
+      await loadNotifications();
+      onRefresh();
       setToast({ message: "Notification sent", type: "success" });
     } catch (e) { setError(e.message); }
     finally { setSubmitting(false); }
   }
 
-  // ── Step 1: show confirm dialog ──────────────────────────────────────────
   function askDelete(notif) {
     setConfirm({ id: notif.notification_id, title: notif.title });
   }
 
-  // ── Step 2: confirmed — call API, optimistically remove, then sync ───────
   async function confirmDelete() {
     const { id, title } = confirm;
     setConfirm(null);
     setDeletingId(id);
 
-    // Optimistic removal — instant visual feedback
     setNotifications(prev => prev.filter(n => n.notification_id !== id));
 
     try {
       await apiFetch(`/gym/${gymId}/notifications/${id}`, { method: "DELETE" });
       setToast({ message: `"${title}" deleted`, type: "success" });
-      onRefresh();   // sync dashboard notification count
+      onRefresh();
     } catch (e) {
-      // Rollback: re-fetch on failure
       await loadNotifications();
       setToast({ message: `Delete failed: ${e.message}`, type: "error" });
     } finally {
@@ -1377,16 +1344,11 @@ export default function AdminDashboard() {
   const [billingSummary, setBillingSummary] = useState(null);
   const [loading, setLoading]             = useState(true);
 
-  // ── Pro plan activation gate state ────────────────────────────────────────
-  // checkingActivation: still waiting on the backend to tell us whether this
-  // gym's ₹5,000/year Pro fee has been paid. activationRequired: true means
-  // render the payment gate instead of the dashboard — no bypass.
   const [checkingActivation, setCheckingActivation] = useState(true);
   const [activationRequired, setActivationRequired] = useState(false);
   const [activationExpired, setActivationExpired]   = useState(false);
   const [activationAmount, setActivationAmount]     = useState(5000);
 
-  // ── Renewal reminder state (non-blocking, shown when NOT gated) ──────────
   const [proExpiresAt, setProExpiresAt]         = useState(null);
   const [proDaysLeft, setProDaysLeft]           = useState(null);
   const [proExpiringSoon, setProExpiringSoon]   = useState(false);
@@ -1413,9 +1375,6 @@ export default function AdminDashboard() {
     } finally { setLoading(false); }
   }
 
-  // Step 1 after login: find out if this gym needs to pay the Pro
-  // activation fee before it can see anything else. Also captures expiry
-  // info for the non-blocking renewal reminder when access IS allowed.
   useEffect(() => {
     if (!authed || !gymId) return;
     setCheckingActivation(true);
@@ -1434,8 +1393,6 @@ export default function AdminDashboard() {
       .finally(() => setCheckingActivation(false));
   }, [authed, gymId]);
 
-  // Step 2: only load the actual dashboard data once we know activation
-  // isn't blocking access.
   useEffect(() => {
     if (authed && !checkingActivation && !activationRequired) loadAll();
   }, [authed, checkingActivation, activationRequired]);
@@ -1465,20 +1422,10 @@ export default function AdminDashboard() {
 
   const currentLabel = NAV.find(n => n.id === active)?.label || "";
 
-  // ── Billing badge = pending invoices (always accurate from data) +
-  //    unread billing alerts (cleared once the admin opens Billing).
-  //    Unlike before, this no longer depends on which tab is selected —
-  //    a paid invoice or a read alert is what actually clears it.
   const unreadBillingAlerts = notifications.filter(n => n.type === "billing" && n.read !== true).length;
   const pendingInvoices     = billingSummary?.pending_count || 0;
   const billingBadgeCount   = pendingInvoices + unreadBillingAlerts;
 
-  // Refreshes only billingSummary — deliberately bypasses loadAll()'s
-  // `loading` flag, since that conditional render unmounts whichever tab
-  // is showing. BillingTab fetches its own copy on mount; routing this
-  // through loadAll() would re-trigger that mount forever. Safe to call
-  // from anywhere (tab open, manual refresh, payment success) because it
-  // touches nothing but billingSummary.
   function refreshBillingBadge() {
     if (!gymId) return;
     apiFetch(`/gym/${gymId}/billing-summary`).then(setBillingSummary).catch(() => {});
@@ -1491,8 +1438,6 @@ export default function AdminDashboard() {
     if (unreadBillingAlerts > 0 && gymId) {
       try {
         await apiFetch(`/gym/${gymId}/notifications/mark-billing-read`, { method: "POST" });
-        // Reflect the read state locally without a full reload, so the
-        // pending-invoice count (untouched) stays visible immediately.
         setNotifications(prev => prev.map(n => n.type === "billing" ? { ...n, read: true } : n));
       } catch (_) { /* badge will just re-clear next successful load */ }
     }

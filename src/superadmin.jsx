@@ -129,6 +129,17 @@ function trialDaysLeft(expiresAt) {
   return { label: `${days}d left`, urgent: days <= 3 };
 }
 
+// ── Generic days-left helper for Pro gym renewal timings ────────────────────
+// Used for both the yearly Pro-activation renewal (pro_fee_expires_at) and
+// the monthly ₹35/member auto-billing cycle (billing_cycle_next_invoice_at).
+function daysUntil(dateStr) {
+  if (!dateStr) return null;
+  const diff = new Date(dateStr).getTime() - Date.now();
+  if (diff <= 0) return { days: 0, label: "Due now", urgent: true };
+  const days = Math.ceil(diff / 86400000);
+  return { days, label: `${days}d left`, urgent: days <= 5 };
+}
+
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const CUR_MONTH = MONTHS[new Date().getMonth()] + " " + new Date().getFullYear();
 
@@ -176,7 +187,7 @@ function SuperAdminLogin({ onLogin }) {
           </button>
         </div>
         <div style={{ marginTop: 20, fontSize: 11.5, color: T.textMuted, textAlign: "center", lineHeight: 1.6 }}>
-          Default: <code style={{ background: T.bg, padding: "3px 7px", borderRadius: 4 }}>superadmin / aerofit_alpha_2025</code>
+          Default: <code style={{ background: T.bg, padding: "3px 7px", borderRadius: 4 }}></code>
         </div>
       </div>
     </div>
@@ -501,9 +512,6 @@ function CreateInvoiceModal({ gyms, onCreated, onClose }) {
   const [memberCount, setMemberCount] = useState(0);
   const [fetchingMembers, setFetchingMembers] = useState(false);
 
-  // gross is the editable total. autoGross is what we'd compute from members × ₹35.
-  // We track whether the admin has manually touched the field so we know whether
-  // to send an override to the backend or let it auto-calculate again server-side.
   const [gross, setGross] = useState(0);
   const [grossTouched, setGrossTouched] = useState(false);
 
@@ -536,7 +544,6 @@ function CreateInvoiceModal({ gyms, onCreated, onClose }) {
     setLoading(true); setError("");
     try {
       const body = { gym_id: gymId, period: period.trim(), notes };
-      // Only send an override if the super admin actually edited the auto-calculated amount
       if (grossTouched && gross !== autoGross) body.gross_override = gross;
       const res = await apiFetch("/alpha/invoices", { method: "POST", body: JSON.stringify(body) });
       onCreated(res);
@@ -837,6 +844,15 @@ function DashboardTab({ stats, gyms, onAddGym }) {
   ];
   const top5 = [...gyms].sort((a, b) => (b.members || 0) - (a.members || 0)).slice(0, 5);
   const maxM  = top5[0]?.members || 1;
+
+  // ── NEW: Pro gyms whose activation or monthly cycle renews within 5 days ──
+  const proAtRisk = gyms.filter(g => {
+    if (g.plan !== "Pro") return false;
+    const actD = daysUntil(g.pro_fee_expires_at);
+    const monD = daysUntil(g.billing_cycle_next_invoice_at);
+    return (actD && actD.urgent) || (monD && monD.urgent);
+  });
+
   return (
     <div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12, marginBottom: 22 }}>
@@ -857,6 +873,11 @@ function DashboardTab({ stats, gyms, onAddGym }) {
       {stats.trial_gyms > 0 && (
         <div style={{ background: T.amber50, border: `0.5px solid #f0c070`, borderRadius: 10, padding: "10px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 10, fontSize: 13, color: T.amber600 }}>
           ⚠️ <strong>{stats.trial_gyms} gym{stats.trial_gyms > 1 ? "s" : ""}</strong> on trial — convert to Pro before the 14-day window ends or they'll be auto-deleted.
+        </div>
+      )}
+      {proAtRisk.length > 0 && (
+        <div style={{ background: T.amber50, border: `0.5px solid #f0c070`, borderRadius: 10, padding: "10px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 10, fontSize: 13, color: T.amber600 }}>
+          ⏰ <strong>{proAtRisk.length} Pro gym{proAtRisk.length > 1 ? "s" : ""}</strong> {proAtRisk.length > 1 ? "have" : "has"} an activation renewal or monthly bill due within 5 days — check the Gyms tab.
         </div>
       )}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
@@ -898,7 +919,7 @@ function DashboardTab({ stats, gyms, onAddGym }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  GYMS TAB (Simplified - No Pricing Edit, No Starter, Trial Countdown + Upgrade)
+//  GYMS TAB (Trial Countdown + Pro Activation/Monthly Billing Countdowns)
 // ══════════════════════════════════════════════════════════════════════════════
 function GymsTab({ gyms, onRefresh }) {
   const [showAdd, setShowAdd]           = useState(false);
@@ -966,14 +987,21 @@ function GymsTab({ gyms, onRefresh }) {
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
               <thead>
-                <tr>{["Gym", "City", "Plan", "Status", "Members", "Admin Email", ""].map(h => (
-                  <th key={h} style={{ textAlign: "left", fontSize: 10.5, fontWeight: 500, color: T.textMuted, padding: "8px 14px", borderBottom: `0.5px solid ${T.border}`, textTransform: "uppercase" }}>{h}</th>
+                <tr>{["Gym", "City", "Plan", "Status", "Activation Renews", "Next Monthly Bill", "Members", "Admin Email", ""].map(h => (
+                  <th key={h} style={{ textAlign: "left", fontSize: 10.5, fontWeight: 500, color: T.textMuted, padding: "8px 14px", borderBottom: `0.5px solid ${T.border}`, textTransform: "uppercase", whiteSpace: "nowrap" }}>{h}</th>
                 ))}</tr>
               </thead>
               <tbody>
                 {filtered.map((g, i) => {
                   const isTrial   = g.status === "trial";
+                  const isPro     = g.plan === "Pro";
                   const countdown = isTrial ? trialDaysLeft(g.trial_expires_at) : null;
+
+                  // ── Pro-only renewal timings ────────────────────────────
+                  const activation     = isPro ? daysUntil(g.pro_fee_expires_at) : null;
+                  const monthly        = isPro ? daysUntil(g.billing_cycle_next_invoice_at) : null;
+                  const activationPaid = !!g.pro_fee_paid;
+
                   return (
                     <tr key={g.gym_id} style={{ borderBottom: `0.5px solid ${T.border}` }}>
                       <td style={{ padding: "11px 14px" }}>
@@ -992,6 +1020,39 @@ function GymsTab({ gyms, onRefresh }) {
                           </div>
                         )}
                       </td>
+
+                      {/* ── Activation (yearly) renewal countdown ────────── */}
+                      <td style={{ padding: "11px 14px" }}>
+                        {!isPro ? (
+                          <span style={{ fontSize: 11, color: T.gray200 }}>—</span>
+                        ) : !activationPaid ? (
+                          <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, background: T.red50, color: T.red600 }}>Not activated</span>
+                        ) : activation ? (
+                          <div>
+                            <span style={{ fontSize: 11.5, fontWeight: 600, padding: "3px 10px", borderRadius: 20, background: activation.urgent ? T.red50 : T.teal50, color: activation.urgent ? T.red600 : T.teal600 }}>
+                              {activation.urgent ? "⏰ " : ""}{activation.label}
+                            </span>
+                            <div style={{ fontSize: 10, color: T.textMuted, marginTop: 3 }}>{fmtDate(g.pro_fee_expires_at)}</div>
+                          </div>
+                        ) : <span style={{ fontSize: 11, color: T.gray200 }}>—</span>}
+                      </td>
+
+                      {/* ── Monthly ₹35/member billing countdown ─────────── */}
+                      <td style={{ padding: "11px 14px" }}>
+                        {!isPro ? (
+                          <span style={{ fontSize: 11, color: T.gray200 }}>—</span>
+                        ) : !g.billing_cycle_next_invoice_at ? (
+                          <span style={{ fontSize: 11, color: T.textMuted, fontStyle: "italic" }}>Starts at activation</span>
+                        ) : monthly ? (
+                          <div>
+                            <span style={{ fontSize: 11.5, fontWeight: 600, padding: "3px 10px", borderRadius: 20, background: monthly.urgent ? T.amber50 : T.blue50, color: monthly.urgent ? T.amber600 : T.blue600 }}>
+                              {monthly.urgent ? "⏰ " : ""}{monthly.label}
+                            </span>
+                            <div style={{ fontSize: 10, color: T.textMuted, marginTop: 3 }}>{fmtDate(g.billing_cycle_next_invoice_at)}</div>
+                          </div>
+                        ) : <span style={{ fontSize: 11, color: T.gray200 }}>—</span>}
+                      </td>
+
                       <td style={{ padding: "11px 14px", fontWeight: 500 }}>{g.members || 0}</td>
                       <td style={{ padding: "11px 14px", color: T.textMuted, fontSize: 12 }}>{g.admin_email}</td>
                       <td style={{ padding: "11px 14px" }}>
