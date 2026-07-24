@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, Fragment } from "react";
 
 const API = "https://aero-fit-backend.onrender.com";
 
@@ -10,7 +10,14 @@ async function apiFetch(path, opts = {}) {
         headers: { "Content-Type": "application/json" },
         ...opts,
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try {
+          const body = await res.json();
+          if (body?.detail) detail = body.detail;
+        } catch (_) {}
+        throw new Error(detail);
+      }
       return res.json();
     } catch (e) {
       if (attempt === 0) { await new Promise(r => setTimeout(r, 4000)); continue; }
@@ -71,6 +78,27 @@ function expiryCountdown(expiresAt) {
   if (days > 0)  return { label: `${days}d left`,  urgent: days <= 7  };
   if (hours > 0) return { label: `${hours}h left`, urgent: true       };
   return { label: "< 1h left", urgent: true };
+}
+
+// ── 24h "HH:MM" (native <input type="time"> value) → 12h "h:mm AM/PM" ────────
+function to12Hour(t) {
+  if (!t) return "";
+  const [hStr, mStr] = t.split(":");
+  let h = parseInt(hStr, 10);
+  const m = mStr;
+  const ampm = h >= 12 ? "PM" : "AM";
+  h = h % 12;
+  if (h === 0) h = 12;
+  return `${h}:${m} ${ampm}`;
+}
+
+// Locked is the safe default: a member is only ever treated as unlocked when
+// the backend explicitly says workout_plans_locked === false. Brand-new
+// members (freshly redeemed a User ID, no field written yet) fall through to
+// locked=true here, so nobody gets accidental access before an admin assigns
+// a trainer and flips them on.
+function isWorkoutLocked(m) {
+  return m?.workout_plans_locked !== false;
 }
 
 function ConfirmDialog({ message, onConfirm, onCancel }) {
@@ -137,6 +165,8 @@ function Badge({ label }) {
     pending:   { bg: T.amber50,  color: T.amber600  },
     overdue:   { bg: T.red50,    color: T.red600    },
     cancelled: { bg: T.gray50,   color: T.gray600   },
+    Locked:    { bg: T.red50,    color: T.red600    },
+    Unlocked:  { bg: T.teal50,   color: T.teal600   },
   };
   const s = MAP[label] || { bg: T.gray50, color: T.gray600 };
   return (
@@ -206,14 +236,165 @@ function Empty({ msg = "No data yet" }) {
 const NAV = [
   { id: "dashboard",     icon: "⊞",  label: "Dashboard",     section: "Overview"  },
   { id: "user_ids",      icon: "🪪", label: "User IDs",      section: "Members"   },
+  { id: "workout_access", icon: "🔒", label: "Workout Access", section: "Members" },
+  { id: "batches",       icon: "📅", label: "Batches",       section: "Members"   },
   { id: "billing",       icon: "💰", label: "Billing",       section: "Finance"   },
   { id: "banners",       icon: "🖼",  label: "Banners",       section: "Content"   },
+  { id: "trainers", icon: "🏋️", label: "Trainers", section: "Members" },
   { id: "notifications", icon: "🔔", label: "Notifications", section: "Content"   },
   { id: "config",        icon: "⚙",  label: "App Config",    section: "Settings"  },
 ];
 const SECTIONS = [...new Set(NAV.map(n => n.section))];
 
+// ── Forgot / reset password flow — used inside the AdminLogin card ───────────
+// Mirrors the backend's gym-admin reset endpoints exactly:
+//   POST /gym-admin/forgot-password   { email }                → generic "ok" response
+//   POST /gym-admin/verify-otp        { email, otp }            → { reset_token }
+//   POST /gym-admin/reset-password    { email, reset_token, new_password }
+function ForgotPasswordPanel({ initialEmail, onDone, onBackToLogin }) {
+  const [step, setStep]         = useState("email"); // "email" | "otp" | "reset" | "success"
+  const [email, setEmail]       = useState(initialEmail || "");
+  const [otp, setOtp]           = useState("");
+  const [resetToken, setResetToken] = useState("");
+  const [newPass, setNewPass]   = useState("");
+  const [confirmPass, setConfirmPass] = useState("");
+  const [loading, setLoading]   = useState(false);
+  const [error, setError]       = useState("");
+  const [info, setInfo]         = useState("");
+
+  async function sendOtp() {
+    const trimmed = email.trim().toLowerCase();
+    if (!trimmed) { setError("Enter your email first"); return; }
+    setLoading(true); setError(""); setInfo("");
+    try {
+      await apiFetch("/gym-admin/forgot-password", {
+        method: "POST",
+        body: JSON.stringify({ email: trimmed }),
+      });
+      setEmail(trimmed);
+      setStep("otp");
+      setInfo("If an admin account exists for this email, we've sent a 6-digit code.");
+    } catch (e) {
+      setError(e.message || "Could not send the code. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function verifyOtp() {
+    if (!otp.trim()) { setError("Enter the code from your email"); return; }
+    setLoading(true); setError(""); setInfo("");
+    try {
+      const res = await apiFetch("/gym-admin/verify-otp", {
+        method: "POST",
+        body: JSON.stringify({ email, otp: otp.trim() }),
+      });
+      setResetToken(res.reset_token);
+      setStep("reset");
+    } catch (e) {
+      setError(e.message || "Incorrect or expired code.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function resetPassword() {
+    if (newPass.length < 6) { setError("Password must be at least 6 characters"); return; }
+    if (newPass !== confirmPass) { setError("Passwords don't match"); return; }
+    setLoading(true); setError("");
+    try {
+      await apiFetch("/gym-admin/reset-password", {
+        method: "POST",
+        body: JSON.stringify({ email, reset_token: resetToken, new_password: newPass }),
+      });
+      setStep("success");
+    } catch (e) {
+      setError(e.message || "Could not reset your password. Please start over.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div>
+      <div style={{ marginBottom: 22 }}>
+        <div style={{ fontSize: 20, fontWeight: 600, color: T.text }}>Aero<span style={{ color: T.teal600 }}>fit</span></div>
+        <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3 }}>
+          {step === "success" ? "Password reset" : "Reset your password"}
+        </div>
+      </div>
+
+      {step === "email" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
+          <div style={{ fontSize: 12.5, color: T.textMuted, lineHeight: 1.5 }}>
+            Enter the email you use to sign in. We'll send a 6-digit code to reset your password.
+          </div>
+          <Input label="Email" value={email} onChange={setEmail} type="email" placeholder="admin@fitzone.in" />
+          {error && <div style={{ fontSize: 12, color: T.red600, background: T.red50, padding: "8px 12px", borderRadius: 8 }}>{error}</div>}
+          <button onClick={sendOtp} disabled={loading} style={{ background: T.teal600, color: "#fff", border: "none", borderRadius: 8, padding: "10px", fontSize: 13.5, fontWeight: 600, cursor: loading ? "not-allowed" : "pointer", opacity: loading ? 0.7 : 1 }}>
+            {loading ? "Sending…" : "Send Code"}
+          </button>
+        </div>
+      )}
+
+      {step === "otp" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
+          <div style={{ fontSize: 12.5, color: T.textMuted, lineHeight: 1.5 }}>
+            Enter the 6-digit code sent to <strong style={{ color: T.text }}>{email}</strong>.
+          </div>
+          <Input label="Code" value={otp} onChange={v => setOtp(v.replace(/\D/g, "").slice(0, 6))} type="text" placeholder="123456" />
+          {info && <div style={{ fontSize: 12, color: T.teal600, background: T.teal50, padding: "8px 12px", borderRadius: 8 }}>{info}</div>}
+          {error && <div style={{ fontSize: 12, color: T.red600, background: T.red50, padding: "8px 12px", borderRadius: 8 }}>{error}</div>}
+          <button onClick={verifyOtp} disabled={loading} style={{ background: T.teal600, color: "#fff", border: "none", borderRadius: 8, padding: "10px", fontSize: 13.5, fontWeight: 600, cursor: loading ? "not-allowed" : "pointer", opacity: loading ? 0.7 : 1 }}>
+            {loading ? "Verifying…" : "Verify Code"}
+          </button>
+          <button onClick={sendOtp} disabled={loading} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 12, cursor: loading ? "not-allowed" : "pointer", textDecoration: "underline", alignSelf: "center" }}>
+            Resend code
+          </button>
+        </div>
+      )}
+
+      {step === "reset" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
+          <div style={{ fontSize: 12.5, color: T.textMuted, lineHeight: 1.5 }}>
+            Choose a new password for <strong style={{ color: T.text }}>{email}</strong>.
+          </div>
+          <Input label="New password" value={newPass} onChange={setNewPass} type="password" placeholder="At least 6 characters" />
+          <Input label="Confirm new password" value={confirmPass} onChange={setConfirmPass} type="password" placeholder="Re-enter password" />
+          {error && <div style={{ fontSize: 12, color: T.red600, background: T.red50, padding: "8px 12px", borderRadius: 8 }}>{error}</div>}
+          <button onClick={resetPassword} disabled={loading} style={{ background: T.teal600, color: "#fff", border: "none", borderRadius: 8, padding: "10px", fontSize: 13.5, fontWeight: 600, cursor: loading ? "not-allowed" : "pointer", opacity: loading ? 0.7 : 1 }}>
+            {loading ? "Resetting…" : "Reset Password"}
+          </button>
+        </div>
+      )}
+
+      {step === "success" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ background: T.teal50, borderRadius: 10, padding: "14px 16px", display: "flex", alignItems: "flex-start", gap: 10 }}>
+            <span style={{ fontSize: 18 }}>✓</span>
+            <div style={{ fontSize: 13, color: T.teal700, lineHeight: 1.5 }}>
+              Your password has been reset. You can now sign in with your new password.
+            </div>
+          </div>
+          <button onClick={onDone} style={{ background: T.teal600, color: "#fff", border: "none", borderRadius: 8, padding: "10px", fontSize: 13.5, fontWeight: 600, cursor: "pointer" }}>
+            Back to Sign In
+          </button>
+        </div>
+      )}
+
+      {step !== "success" && (
+        <div style={{ marginTop: 16, textAlign: "center" }}>
+          <button onClick={onBackToLogin} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 12, cursor: "pointer", textDecoration: "underline" }}>
+            ← Back to sign in
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AdminLogin({ onLogin }) {
+  const [mode, setMode]   = useState("login"); // "login" | "forgot"
   const [email, setEmail] = useState("");
   const [pass, setPass]   = useState("");
   const [error, setError] = useState("");
@@ -242,21 +423,39 @@ function AdminLogin({ onLogin }) {
   return (
     <div style={{ minHeight: "100vh", background: T.bg, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'DM Sans', system-ui, sans-serif" }}>
       <div style={{ background: T.surface, borderRadius: 16, padding: 36, border: `0.5px solid ${T.border}`, width: 360, boxShadow: "0 4px 24px rgba(0,0,0,0.06)" }}>
-        <div style={{ marginBottom: 28 }}>
-          <div style={{ fontSize: 20, fontWeight: 600, color: T.text }}>Aero<span style={{ color: T.teal600 }}>fit</span></div>
-          <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3 }}>Gym Admin Console</div>
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
-          <Input label="Email" value={email} onChange={setEmail} type="email" placeholder="admin@fitzone.in" />
-          <Input label="Password" value={pass} onChange={setPass} type="password" placeholder="••••••••" />
-          {error && <div style={{ fontSize: 12, color: T.red600, background: T.red50, padding: "8px 12px", borderRadius: 8 }}>{error}</div>}
-          <button onClick={login} disabled={loading} style={{ background: T.teal600, color: "#fff", border: "none", borderRadius: 8, padding: "10px", fontSize: 13.5, fontWeight: 600, cursor: loading ? "not-allowed" : "pointer", opacity: loading ? 0.7 : 1 }}>
-            {loading ? "Signing in…" : "Sign In"}
-          </button>
-        </div>
-        <div style={{ marginTop: 16, fontSize: 11.5, color: T.textMuted, textAlign: "center" }}>
-          Credentials provided by your Aerofit super admin.
-        </div>
+        {mode === "login" ? (
+          <>
+            <div style={{ marginBottom: 28 }}>
+              <div style={{ fontSize: 20, fontWeight: 600, color: T.text }}>Aero<span style={{ color: T.teal600 }}>fit</span></div>
+              <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3 }}>Gym Admin Console</div>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
+              <Input label="Email" value={email} onChange={setEmail} type="email" placeholder="admin@fitzone.in" />
+              <div>
+                <Input label="Password" value={pass} onChange={setPass} type="password" placeholder="••••••••" />
+                <button
+                  onClick={() => { setError(""); setMode("forgot"); }}
+                  style={{ background: "none", border: "none", color: T.teal600, fontSize: 11.5, cursor: "pointer", marginTop: 6, padding: 0 }}
+                >
+                  Forgot password?
+                </button>
+              </div>
+              {error && <div style={{ fontSize: 12, color: T.red600, background: T.red50, padding: "8px 12px", borderRadius: 8 }}>{error}</div>}
+              <button onClick={login} disabled={loading} style={{ background: T.teal600, color: "#fff", border: "none", borderRadius: 8, padding: "10px", fontSize: 13.5, fontWeight: 600, cursor: loading ? "not-allowed" : "pointer", opacity: loading ? 0.7 : 1 }}>
+                {loading ? "Signing in…" : "Sign In"}
+              </button>
+            </div>
+            <div style={{ marginTop: 16, fontSize: 11.5, color: T.textMuted, textAlign: "center" }}>
+              Credentials provided by your Aerofit super admin.
+            </div>
+          </>
+        ) : (
+          <ForgotPasswordPanel
+            initialEmail={email}
+            onDone={() => setMode("login")}
+            onBackToLogin={() => setMode("login")}
+          />
+        )}
       </div>
     </div>
   );
@@ -341,6 +540,353 @@ function ProActivationGate({ gymInfo, amount, expired, onActivated }) {
         >
           Sign out
         </button>
+      </div>
+    </div>
+  );
+}
+
+function TrainersTab({ gymId }) {
+  const [trainers, setTrainers]     = useState([]);
+  const [loading, setLoading]       = useState(true);
+  const [showForm, setShowForm]     = useState(false);
+  const [editingTrainer, setEditingTrainer] = useState(null); // trainer object being edited, or null = "add" mode
+  const [submitting, setSubmitting] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
+  const [confirm, setConfirm]       = useState(null);
+  const [toast, setToast]           = useState(null);
+  const [error, setError]           = useState("");
+
+  const emptyForm = { name: "", specialty: "", experience_years: 1, certifications: "" };
+  const [form, setForm] = useState(emptyForm);
+  const set = k => v => setForm(f => ({ ...f, [k]: v }));
+
+  async function loadTrainers() {
+    setLoading(true);
+    try {
+      const data = await apiFetch(`/gym/${gymId}/trainers`);
+      setTrainers(Array.isArray(data) ? data : []);
+    } catch { setTrainers([]); }
+    finally { setLoading(false); }
+  }
+
+  useEffect(() => { loadTrainers(); }, [gymId]);
+
+  function openAddForm() {
+    setEditingTrainer(null);
+    setForm(emptyForm);
+    setError("");
+    setShowForm(true);
+  }
+
+  function openEditForm(trainer) {
+    setEditingTrainer(trainer);
+    setForm({
+      name: trainer.name || "",
+      specialty: trainer.specialty || "",
+      experience_years: trainer.experience_years ?? 1,
+      certifications: (trainer.certifications || []).join(", "),
+    });
+    setError("");
+    setShowForm(true);
+  }
+
+  function closeForm() {
+    setShowForm(false);
+    setEditingTrainer(null);
+    setForm(emptyForm);
+    setError("");
+  }
+
+  async function submit() {
+    if (!form.name.trim() || !form.specialty.trim()) {
+      setError("Name and specialty are required.");
+      return;
+    }
+    setSubmitting(true); setError("");
+    const payload = {
+      name: form.name.trim(),
+      specialty: form.specialty.trim(),
+      experience_years: Number(form.experience_years) || 0,
+      certifications: form.certifications.split(",").map(c => c.trim()).filter(Boolean),
+    };
+    try {
+      if (editingTrainer) {
+        await apiFetch(`/gym/${gymId}/trainers/${editingTrainer.trainer_id}`, {
+          method: "PATCH",
+          body: JSON.stringify(payload),
+        });
+        setToast({ message: "Trainer updated", type: "success" });
+      } else {
+        await apiFetch(`/gym/${gymId}/trainers`, {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        setToast({ message: "Trainer added", type: "success" });
+      }
+      closeForm();
+      await loadTrainers();
+    } catch (e) { setError(e.message); }
+    finally { setSubmitting(false); }
+  }
+
+  function askDelete(trainer) { setConfirm({ id: trainer.trainer_id, title: trainer.name }); }
+
+  async function confirmDelete() {
+    const { id, title } = confirm;
+    setConfirm(null);
+    setDeletingId(id);
+    setTrainers(prev => prev.filter(t => t.trainer_id !== id));
+    try {
+      await apiFetch(`/gym/${gymId}/trainers/${id}`, { method: "DELETE" });
+      setToast({ message: `"${title}" removed`, type: "success" });
+    } catch (e) {
+      await loadTrainers();
+      setToast({ message: `Delete failed: ${e.message}`, type: "error" });
+    } finally { setDeletingId(null); }
+  }
+
+  return (
+    <div>
+      {confirm && (
+        <ConfirmDialog
+          message={`Remove trainer "${confirm.title}"? This will remove them from the app immediately.`}
+          onConfirm={confirmDelete}
+          onCancel={() => setConfirm(null)}
+        />
+      )}
+      {toast && <Toast message={toast.message} type={toast.type} onDone={() => setToast(null)} />}
+
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
+        <Btn variant="primary" onClick={() => (showForm ? closeForm() : openAddForm())}>
+          {showForm ? "✕ Cancel" : "+ Add Trainer"}
+        </Btn>
+      </div>
+
+      {showForm && (
+        <Card style={{ marginBottom: 18 }}>
+          <CardHeader title={editingTrainer ? "Edit Trainer" : "Add Trainer"} icon="🏋️" />
+          <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <Input label="Name *" value={form.name} onChange={set("name")} placeholder="Rohan Verma" />
+              <Input label="Specialty *" value={form.specialty} onChange={set("specialty")} placeholder="Strength & Powerlifting" />
+            </div>
+            <Input label="Experience (years)" value={form.experience_years} onChange={set("experience_years")} type="number" />
+            <Input label="Certifications (comma separated)" value={form.certifications} onChange={set("certifications")} placeholder="ACE-CPT, Sports Nutrition" />
+            {error && <div style={{ fontSize: 12, color: T.red600, background: T.red50, padding: "8px 12px", borderRadius: 8 }}>{error}</div>}
+            <Btn variant="primary" onClick={submit} disabled={submitting} style={{ alignSelf: "flex-end", padding: "8px 20px" }}>
+              {submitting ? "Saving…" : editingTrainer ? "Save Changes" : "Add Trainer"}
+            </Btn>
+          </div>
+        </Card>
+      )}
+
+      <Card>
+        <CardHeader title={`Trainers (${trainers.length})`} icon="🏋️"
+          action={<Btn variant="ghost" onClick={loadTrainers} style={{ fontSize: 11, padding: "4px 10px" }}>🔄 Refresh</Btn>}
+        />
+        {loading ? <Spinner /> : trainers.length === 0 ? (
+          <Empty msg="No trainers yet. Add one above to show it in the app." />
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr>{["Name", "Specialty", "Experience", "Certifications", ""].map(h => (
+                  <th key={h} style={{ textAlign: "left", fontSize: 10.5, fontWeight: 500, color: T.textMuted, padding: "8px 14px", borderBottom: `0.5px solid ${T.border}`, textTransform: "uppercase" }}>{h}</th>
+                ))}</tr>
+              </thead>
+              <tbody>
+                {trainers.map(t => (
+                  <tr key={t.trainer_id} style={{ borderBottom: `0.5px solid ${T.border}`, opacity: deletingId === t.trainer_id ? 0.4 : 1 }}>
+                    <td style={{ padding: "11px 14px", fontWeight: 500, color: T.text }}>{t.name}</td>
+                    <td style={{ padding: "11px 14px", color: T.textMuted }}>{t.specialty}</td>
+                    <td style={{ padding: "11px 14px", color: T.textMuted }}>{t.experience_years} yrs</td>
+                    <td style={{ padding: "11px 14px" }}>
+                      <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+                        {(t.certifications || []).map(c => <Badge key={c} label={c} />)}
+                      </div>
+                    </td>
+                    <td style={{ padding: "11px 14px" }}>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <Btn variant="ghost" onClick={() => openEditForm(t)} style={{ fontSize: 12, padding: "4px 10px" }}>
+                          ✏️ Edit
+                        </Btn>
+                        <Btn variant="danger" onClick={() => askDelete(t)} disabled={deletingId === t.trainer_id} style={{ fontSize: 12, padding: "4px 10px" }}>
+                          {deletingId === t.trainer_id ? "Removing…" : "Remove"}
+                        </Btn>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+// ── Signature capture — mouse + touch canvas, produces a PNG data URL ────────
+function SignaturePad({ onChange }) {
+  const canvasRef = useRef(null);
+  const drawing   = useRef(false);
+  const hasDrawn  = useRef(false);
+
+  useEffect(() => {
+    const ctx = canvasRef.current.getContext("2d");
+    ctx.lineWidth   = 2.2;
+    ctx.lineCap     = "round";
+    ctx.lineJoin    = "round";
+    ctx.strokeStyle = T.text;
+  }, []);
+
+  function pointFromEvent(e) {
+    const rect  = canvasRef.current.getBoundingClientRect();
+    const point = e.touches && e.touches[0] ? e.touches[0] : e;
+    const scaleX = canvasRef.current.width / rect.width;
+    const scaleY = canvasRef.current.height / rect.height;
+    return { x: (point.clientX - rect.left) * scaleX, y: (point.clientY - rect.top) * scaleY };
+  }
+
+  function start(e) {
+    e.preventDefault();
+    drawing.current = true;
+    const { x, y } = pointFromEvent(e);
+    const ctx = canvasRef.current.getContext("2d");
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+  }
+
+  function move(e) {
+    if (!drawing.current) return;
+    e.preventDefault();
+    const { x, y } = pointFromEvent(e);
+    const ctx = canvasRef.current.getContext("2d");
+    ctx.lineTo(x, y);
+    ctx.stroke();
+    hasDrawn.current = true;
+  }
+
+  function end() {
+    if (!drawing.current) return;
+    drawing.current = false;
+    if (hasDrawn.current) onChange(canvasRef.current.toDataURL("image/png"));
+  }
+
+  function clear() {
+    const canvas = canvasRef.current;
+    canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+    hasDrawn.current = false;
+    onChange("");
+  }
+
+  return (
+    <div>
+      <canvas
+        ref={canvasRef}
+        width={460}
+        height={150}
+        style={{ width: "100%", height: 150, border: `0.5px solid ${T.borderMid}`, borderRadius: 10, background: "#fff", touchAction: "none", cursor: "crosshair", display: "block" }}
+        onMouseDown={start} onMouseMove={move} onMouseUp={end} onMouseLeave={end}
+        onTouchStart={start} onTouchMove={move} onTouchEnd={end}
+      />
+      <button onClick={clear} style={{ marginTop: 8, background: "none", border: "none", color: T.textMuted, fontSize: 11.5, cursor: "pointer", textDecoration: "underline" }}>
+        Clear signature
+      </button>
+    </div>
+  );
+}
+
+// ── Gym Partnership Agreement gate — shown once, after Pro Activation is
+// paid and before the rest of the dashboard unlocks. Mirrors the backend's
+// AgreementSubmit model exactly: admin_name, gym_name, id_type, id_number,
+// signature_base64, id_proof_base64. ─────────────────────────────────────────
+function AgreementGate({ gymInfo, monthlyFee, onSigned }) {
+  const [gymName, setGymName]       = useState(gymInfo.gym_name   || "");
+  const [adminName, setAdminName]   = useState(gymInfo.admin_name || "");
+  const [idType, setIdType]         = useState("Aadhar");
+  const [idNumber, setIdNumber]     = useState("");
+  const [signature, setSignature]   = useState("");
+  const [idProofB64, setIdProofB64] = useState("");
+  const [idProofPreview, setIdProofPreview] = useState("");
+  const [loading, setLoading]       = useState(false);
+  const [error, setError]           = useState("");
+  const fileRef = useRef();
+
+  function pickIdProof(e) {
+    const file = e.target.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => { setIdProofB64(ev.target.result); setIdProofPreview(ev.target.result); };
+    reader.readAsDataURL(file);
+  }
+
+  async function submit() {
+    if (!gymName.trim() || !adminName.trim() || !idNumber.trim() || !signature || !idProofB64) {
+      setError("Please fill all fields, upload your ID proof, and sign above.");
+      return;
+    }
+    setLoading(true); setError("");
+    try {
+      await apiFetch(`/gym/${gymInfo.gym_id}/agreement/submit`, {
+        method: "POST",
+        body: JSON.stringify({
+          admin_name:       adminName.trim(),
+          gym_name:         gymName.trim(),
+          id_type:          idType,
+          id_number:        idNumber.trim(),
+          signature_base64: signature,
+          id_proof_base64:  idProofB64,
+        }),
+      });
+      onSigned();
+    } catch (e) {
+      setError(e.message || "Failed to submit the agreement. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", background: T.bg, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'DM Sans', system-ui, sans-serif", padding: 20 }}>
+      <div style={{ background: T.surface, borderRadius: 18, padding: 34, border: `0.5px solid ${T.border}`, width: 480, maxWidth: "94vw", boxShadow: "0 4px 32px rgba(0,0,0,0.08)" }}>
+        <div style={{ width: 52, height: 52, borderRadius: 14, background: T.teal50, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, marginBottom: 16 }}>📝</div>
+        <div style={{ fontSize: 18, fontWeight: 700, color: T.text, marginBottom: 6 }}>Sign Your Partnership Agreement</div>
+        <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.6, marginBottom: 20 }}>
+          One last step before your dashboard unlocks — this confirms the ₹{monthlyFee}/user monthly fee and platform terms. Takes under a minute.
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <Input label="Gym Name" value={gymName} onChange={setGymName} placeholder="FitZone Gurugram" />
+          <Input label="Your Full Name" value={adminName} onChange={setAdminName} placeholder="Rahul Sharma" />
+          <div>
+            <label style={{ fontSize: 12, color: T.textMuted, fontWeight: 500, display: "block", marginBottom: 4 }}>ID Proof Type</label>
+            <select value={idType} onChange={e => setIdType(e.target.value)}
+              style={{ border: `0.5px solid ${T.borderMid}`, borderRadius: 8, padding: "8px 11px", fontSize: 13, width: "100%", background: T.bg, color: T.text }}>
+              {["Aadhar", "Driving License", "Other"].map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+          <Input label="ID Number" value={idNumber} onChange={setIdNumber} placeholder="e.g. XXXX XXXX 1234" />
+          <div>
+            <label style={{ fontSize: 12, color: T.textMuted, fontWeight: 500, display: "block", marginBottom: 6 }}>ID Proof Image</label>
+            <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+              <button onClick={() => fileRef.current.click()} style={{ background: "none", color: T.teal600, border: `0.5px solid ${T.border}`, borderRadius: 8, padding: "7px 14px", fontSize: 12.5, cursor: "pointer", fontWeight: 500 }}>
+                📁 {idProofPreview ? "Change image" : "Upload image"}
+              </button>
+              {idProofPreview && <img src={idProofPreview} alt="ID proof preview" style={{ height: 40, borderRadius: 6, objectFit: "cover" }} />}
+            </div>
+            <input ref={fileRef} type="file" accept="image/*" onChange={pickIdProof} style={{ display: "none" }} />
+          </div>
+          <div>
+            <label style={{ fontSize: 12, color: T.textMuted, fontWeight: 500, display: "block", marginBottom: 6 }}>Signature</label>
+            <SignaturePad onChange={setSignature} />
+          </div>
+          {error && <div style={{ fontSize: 12, color: T.red600, background: T.red50, padding: "9px 13px", borderRadius: 8 }}>❌ {error}</div>}
+          <button onClick={submit} disabled={loading} style={{ background: T.teal600, color: "#fff", border: "none", borderRadius: 10, padding: "12px", fontSize: 14, fontWeight: 600, cursor: loading ? "not-allowed" : "pointer", opacity: loading ? 0.7 : 1, marginTop: 2 }}>
+            {loading ? "Submitting…" : "I Agree & Sign"}
+          </button>
+          <div style={{ fontSize: 11, color: T.textMuted, lineHeight: 1.5, textAlign: "center" }}>
+            Your signature and ID are stored securely and used only for verification and legal record-keeping.
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -736,6 +1282,246 @@ function BillingNotifications({ gymId }) {
   );
 }
 
+// ── Batches Tab ───────────────────────────────────────────────────────────────
+// ── Batches Tab ───────────────────────────────────────────────────────────────
+function BatchesTab({ gymId }) {
+  const [batches, setBatches]       = useState([]);
+  const [loading, setLoading]       = useState(true);
+  const [showForm, setShowForm]     = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
+  const [editingId, setEditingId]   = useState(null);
+  const [confirm, setConfirm]       = useState(null);
+  const [toast, setToast]           = useState(null);
+  const [error, setError]           = useState("");
+  const [expandedId, setExpandedId] = useState(null); // batch_id currently showing its member list
+
+  const DAY_OPTIONS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const emptyForm = { name: "", days: [], startTime: "", endTime: "", trainer_name: "", capacity: 20 };
+  const [form, setForm] = useState(emptyForm);
+  const set = k => v => setForm(f => ({ ...f, [k]: v }));
+
+  async function loadBatches() {
+    setLoading(true);
+    try {
+      const data = await apiFetch(`/gym/${gymId}/batches`);
+      setBatches(Array.isArray(data) ? data : []);
+    } catch { setBatches([]); }
+    finally { setLoading(false); }
+  }
+
+  useEffect(() => { loadBatches(); }, [gymId]);
+
+  function toggleDay(day) {
+    setForm(f => ({
+      ...f,
+      days: f.days.includes(day) ? f.days.filter(d => d !== day) : [...f.days, day],
+    }));
+  }
+
+  async function submit() {
+    if (!form.name.trim() || form.days.length === 0 || !form.startTime || !form.endTime || !form.trainer_name.trim()) {
+      setError("Please fill in name, days, time, and trainer.");
+      return;
+    }
+    setSubmitting(true); setError("");
+    try {
+      await apiFetch(`/gym/${gymId}/batches`, {
+        method: "POST",
+        body: JSON.stringify({
+          name:         form.name.trim(),
+          time:         `${to12Hour(form.startTime)} – ${to12Hour(form.endTime)}`,
+          days_label:   form.days.join(" · "),
+          trainer_name: form.trainer_name.trim(),
+          capacity:     Number(form.capacity) || 20,
+          member_count: 0,
+        }),
+      });
+      setForm(emptyForm);
+      setShowForm(false);
+      await loadBatches();
+      setToast({ message: "Batch created", type: "success" });
+    } catch (e) { setError(e.message); }
+    finally { setSubmitting(false); }
+  }
+
+  async function updateMemberCount(batch, count) {
+    setBatches(prev => prev.map(b => b.batch_id === batch.batch_id ? { ...b, member_count: count } : b));
+    try {
+      await apiFetch(`/gym/${gymId}/batches/${batch.batch_id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ member_count: count }),
+      });
+    } catch (e) {
+      await loadBatches();
+      setToast({ message: "Failed to update: " + e.message, type: "error" });
+    } finally { setEditingId(null); }
+  }
+
+  function askDelete(batch) { setConfirm({ id: batch.batch_id, title: batch.name }); }
+
+  async function confirmDelete() {
+    const { id, title } = confirm;
+    setConfirm(null);
+    setDeletingId(id);
+    setBatches(prev => prev.filter(b => b.batch_id !== id));
+    try {
+      await apiFetch(`/gym/${gymId}/batches/${id}`, { method: "DELETE" });
+      setToast({ message: `"${title}" deleted`, type: "success" });
+    } catch (e) {
+      await loadBatches();
+      setToast({ message: `Delete failed: ${e.message}`, type: "error" });
+    } finally { setDeletingId(null); }
+  }
+
+  // Prefer the live enrolled_emails count once it exists (self-enroll flow is
+  // the source of truth going forward); fall back to the manually-edited
+  // member_count for batches created before enrolled_emails was introduced.
+  function displayCount(b) {
+    const enrolled = b.enrolled_emails;
+    if (Array.isArray(enrolled)) return enrolled.length;
+    return b.member_count ?? 0;
+  }
+
+  return (
+    <div>
+      {confirm && (
+        <ConfirmDialog
+          message={`Delete the batch "${confirm.title}"? This will remove it from the app immediately.`}
+          onConfirm={confirmDelete}
+          onCancel={() => setConfirm(null)}
+        />
+      )}
+      {toast && <Toast message={toast.message} type={toast.type} onDone={() => setToast(null)} />}
+
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
+        <Btn variant="primary" onClick={() => setShowForm(v => !v)}>{showForm ? "✕ Cancel" : "+ New Batch"}</Btn>
+      </div>
+
+      {showForm && (
+        <Card style={{ marginBottom: 18 }}>
+          <CardHeader title="Create Batch" icon="📅" />
+          <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
+            <Input label="Batch Name *" value={form.name} onChange={set("name")} placeholder="Morning Strength" />
+            <div>
+              <label style={{ fontSize: 12, color: T.textMuted, fontWeight: 500, display: "block", marginBottom: 6 }}>Days *</label>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {DAY_OPTIONS.map(day => (
+                  <button key={day} onClick={() => toggleDay(day)} style={{
+                    padding: "6px 12px", borderRadius: 8, fontSize: 12, fontWeight: 500, cursor: "pointer",
+                    border: form.days.includes(day) ? `1.5px solid ${T.teal600}` : `0.5px solid ${T.borderMid}`,
+                    background: form.days.includes(day) ? T.teal50 : T.surface,
+                    color: form.days.includes(day) ? T.teal600 : T.textMid,
+                  }}>{day}</button>
+                ))}
+              </div>
+            </div>
+            {/* Start / End time — native time-picker bar instead of free text */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <Input label="Start Time *" value={form.startTime} onChange={set("startTime")} type="time" />
+              <Input label="End Time *" value={form.endTime} onChange={set("endTime")} type="time" />
+            </div>
+            {(form.startTime || form.endTime) && (
+              <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: -6 }}>
+                Preview: {form.startTime ? to12Hour(form.startTime) : "—"} – {form.endTime ? to12Hour(form.endTime) : "—"}
+              </div>
+            )}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <Input label="Trainer Name *" value={form.trainer_name} onChange={set("trainer_name")} placeholder="Rohan Verma" />
+              <Input label="Capacity" value={form.capacity} onChange={set("capacity")} type="number" placeholder="25" />
+            </div>
+            {error && <div style={{ fontSize: 12, color: T.red600, background: T.red50, padding: "8px 12px", borderRadius: 8 }}>{error}</div>}
+            <Btn variant="primary" onClick={submit} disabled={submitting} style={{ alignSelf: "flex-end", padding: "8px 20px" }}>
+              {submitting ? "Saving…" : "Create Batch"}
+            </Btn>
+          </div>
+        </Card>
+      )}
+
+      <Card>
+        <CardHeader title={`Batches (${batches.length})`} icon="📅"
+          action={<Btn variant="ghost" onClick={loadBatches} style={{ fontSize: 11, padding: "4px 10px" }}>🔄 Refresh</Btn>}
+        />
+        {loading ? <Spinner /> : batches.length === 0 ? (
+          <Empty msg="No batches yet. Create one above to show it in the app." />
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr>{["Name", "Schedule", "Trainer", "Members", ""].map(h => (
+                  <th key={h} style={{ textAlign: "left", fontSize: 10.5, fontWeight: 500, color: T.textMuted, padding: "8px 14px", borderBottom: `0.5px solid ${T.border}`, textTransform: "uppercase" }}>{h}</th>
+                ))}</tr>
+              </thead>
+              <tbody>
+                {batches.map(b => {
+                  const enrolled = Array.isArray(b.enrolled_emails) ? b.enrolled_emails : [];
+                  const hasEnrolledList = enrolled.length > 0;
+                  const isExpanded = expandedId === b.batch_id;
+                  return (
+                    <Fragment key={b.batch_id}>
+                      <tr style={{ borderBottom: `0.5px solid ${T.border}`, opacity: deletingId === b.batch_id ? 0.4 : 1 }}>
+                        <td style={{ padding: "11px 14px", fontWeight: 500, color: T.text }}>{b.name}</td>
+                        <td style={{ padding: "11px 14px", color: T.textMuted }}>{b.days_label} · {b.time}</td>
+                        <td style={{ padding: "11px 14px", color: T.textMuted }}>{b.trainer_name}</td>
+                        <td style={{ padding: "11px 14px" }}>
+                          {editingId === b.batch_id ? (
+                            <input type="number" autoFocus defaultValue={b.member_count}
+                              onBlur={e => updateMemberCount(b, Math.max(0, parseInt(e.target.value) || 0))}
+                              style={{ width: 60, border: `1.5px solid ${T.teal600}`, borderRadius: 6, padding: "3px 6px", fontSize: 12 }} />
+                          ) : (
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              <button onClick={() => setEditingId(b.batch_id)} title="Click to edit"
+                                style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: T.teal600 }}>
+                                {displayCount(b)}/{b.capacity} ✏️
+                              </button>
+                              {hasEnrolledList && (
+                                <button
+                                  onClick={() => setExpandedId(isExpanded ? null : b.batch_id)}
+                                  style={{
+                                    fontSize: 10.5, fontWeight: 600, background: T.teal50, color: T.teal600,
+                                    border: "none", borderRadius: 20, padding: "2px 8px", cursor: "pointer",
+                                  }}
+                                >
+                                  {isExpanded ? "Hide list ▲" : "View list ▼"}
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </td>
+                        <td style={{ padding: "11px 14px" }}>
+                          <Btn variant="danger" onClick={() => askDelete(b)} disabled={deletingId === b.batch_id} style={{ fontSize: 12, padding: "4px 10px" }}>
+                            {deletingId === b.batch_id ? "Deleting…" : "Delete"}
+                          </Btn>
+                        </td>
+                      </tr>
+                      {isExpanded && hasEnrolledList && (
+                        <tr style={{ borderBottom: `0.5px solid ${T.border}` }}>
+                          <td colSpan={5} style={{ padding: "8px 14px 12px", background: T.bg }}>
+                            <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 6 }}>
+                              Enrolled members ({enrolled.length}):
+                            </div>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                              {enrolled.map(email => (
+                                <span key={email} style={{ fontSize: 11, background: T.teal50, color: T.teal600, padding: "3px 9px", borderRadius: 20 }}>
+                                  {email}
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
 // ── User IDs Tab ──────────────────────────────────────────────────────────────
 function UserIdsTab({ gymInfo }) {
   const gymId = gymInfo?.gym_id;
@@ -967,6 +1753,281 @@ function UserIdsTab({ gymInfo }) {
   );
 }
 
+// ── Workout Access Tab ────────────────────────────────────────────────────────
+// Lets the gym admin lock/unlock the "Workout Plans" screen per member.
+// Batches and Trainers always stay visible to every member regardless of this
+// setting. Backed by:
+//   GET   /gym/{gym_id}/members
+//   PATCH /gym/{gym_id}/members/{email}/workout-lock   { locked }
+function LockToggle({ locked, busy, onToggle }) {
+  // locked=true  → switch OFF (grey, knob left)
+  // locked=false → switch ON  (teal, knob right) = unlocked/access granted
+  const on = !locked;
+  return (
+    <button
+      onClick={onToggle}
+      disabled={busy}
+      title={locked ? "Locked — click to unlock" : "Unlocked — click to lock"}
+      style={{
+        position: "relative",
+        width: 44,
+        height: 24,
+        borderRadius: 20,
+        border: "none",
+        cursor: busy ? "not-allowed" : "pointer",
+        background: on ? T.teal600 : T.gray200,
+        opacity: busy ? 0.6 : 1,
+        transition: "background 0.2s ease",
+        flexShrink: 0,
+        padding: 0,
+      }}
+    >
+      <span
+        style={{
+          position: "absolute",
+          top: 2,
+          left: on ? 22 : 2,
+          width: 20,
+          height: 20,
+          borderRadius: "50%",
+          background: "#fff",
+          boxShadow: "0 1px 3px rgba(0,0,0,0.25)",
+          transition: "left 0.2s ease",
+        }}
+      />
+    </button>
+  );
+}
+
+function WorkoutAccessTab({ gymId }) {
+  const [members, setMembers]         = useState([]);
+  const [trainers, setTrainers]       = useState([]);
+  const [loading, setLoading]         = useState(true);
+  const [error, setError]             = useState("");
+  const [busyEmail, setBusyEmail]     = useState(null);
+  const [toast, setToast]             = useState(null);
+  const [search, setSearch]           = useState("");
+  const [assignModal, setAssignModal] = useState(null); // { email, name }
+  const [selectedTrainer, setSelectedTrainer] = useState("");
+  const [planModal, setPlanModal]     = useState(null); // { email, name, text }
+
+  async function loadAll() {
+    if (!gymId) return;
+    setLoading(true); setError("");
+    try {
+      const [m, t] = await Promise.all([
+        apiFetch(`/gym/${gymId}/members`),
+        apiFetch(`/gym/${gymId}/trainers`).catch(() => []),
+      ]);
+      setMembers(Array.isArray(m) ? m : []);
+      setTrainers(Array.isArray(t) ? t : []);
+    } catch (e) { setError("Failed to load: " + e.message); }
+    finally { setLoading(false); }
+  }
+
+  useEffect(() => { loadAll(); }, [gymId]);
+
+  function openUnlock(m) {
+    if (trainers.length === 0) {
+      setToast({ message: "Add a trainer first (Trainers tab) before unlocking.", type: "error" });
+      return;
+    }
+    setSelectedTrainer(m.assigned_trainer_id || trainers[0]?.trainer_id || "");
+    setAssignModal({ email: m.email, name: m.name });
+  }
+
+  async function confirmUnlock() {
+    if (!selectedTrainer) { setToast({ message: "Choose a trainer", type: "error" }); return; }
+    const { email } = assignModal;
+    setBusyEmail(email);
+    setAssignModal(null);
+    try {
+      await apiFetch(`/gym/${gymId}/members/${email}/workout-lock`, {
+        method: "PATCH",
+        body: JSON.stringify({ locked: false, trainer_id: selectedTrainer }),
+      });
+      await loadAll();
+      setToast({ message: `Unlocked for ${email}`, type: "success" });
+    } catch (e) {
+      setToast({ message: "Failed: " + e.message, type: "error" });
+    } finally { setBusyEmail(null); }
+  }
+
+  async function lockMember(m) {
+    setBusyEmail(m.email);
+    try {
+      await apiFetch(`/gym/${gymId}/members/${m.email}/workout-lock`, {
+        method: "PATCH",
+        body: JSON.stringify({ locked: true }),
+      });
+      await loadAll();
+      setToast({ message: `Locked for ${m.email}`, type: "success" });
+    } catch (e) {
+      setToast({ message: "Failed: " + e.message, type: "error" });
+    } finally { setBusyEmail(null); }
+  }
+
+  // Single entry point for the sliding toggle — routes to the assign-trainer
+  // modal when turning access ON, or straight to lockMember when turning it OFF.
+  // Uses isWorkoutLocked() (not the raw field) so members missing the field
+  // entirely — e.g. brand-new registrations — read as locked, matching the
+  // "locked by default" behavior we want for new User IDs.
+  function handleToggle(m) {
+    if (isWorkoutLocked(m)) openUnlock(m);
+    else lockMember(m);
+  }
+
+  function openPlan(m) {
+    setPlanModal({ email: m.email, name: m.name, text: m.fitness_plan_text || "" });
+  }
+
+  async function savePlan() {
+    const { email, text } = planModal;
+    setBusyEmail(email);
+    setPlanModal(null);
+    try {
+      await apiFetch(`/gym/${gymId}/members/${email}/fitness-plan`, {
+        method: "PATCH",
+        body: JSON.stringify({ fitness_plan_text: text }),
+      });
+      await loadAll();
+      setToast({ message: `Fitness plan saved for ${email}`, type: "success" });
+    } catch (e) {
+      setToast({ message: "Failed: " + e.message, type: "error" });
+    } finally { setBusyEmail(null); }
+  }
+
+  const filtered = members.filter(m => {
+    if (!search.trim()) return true;
+    const q = search.trim().toLowerCase();
+    return (m.name || "").toLowerCase().includes(q) || (m.email || "").toLowerCase().includes(q);
+  });
+  const lockedMembers   = filtered.filter(m => isWorkoutLocked(m));
+  const unlockedMembers = filtered.filter(m => !isWorkoutLocked(m));
+  const lockedCount = members.filter(m => isWorkoutLocked(m)).length;
+
+  function MemberRow(m) {
+    const locked = isWorkoutLocked(m);
+    const busy = busyEmail === m.email;
+    return (
+      <div key={m.email} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 18px", borderBottom: `0.5px solid ${T.border}` }}>
+        <div style={{ width: 34, height: 34, borderRadius: "50%", background: T.teal50, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 600, color: T.teal600, flexShrink: 0 }}>
+          {(m.name || m.email)[0]?.toUpperCase()}
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 500, color: T.text }}>{m.name || "—"}</div>
+          <div style={{ fontSize: 11.5, color: T.textMuted }}>{m.email}</div>
+          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3 }}>
+            {m.assigned_trainer_name ? `🏋️ ${m.assigned_trainer_name}` : "No trainer assigned"}
+          </div>
+        </div>
+        {/* Plan editing only makes sense once a member has workout access */}
+        {!locked && (
+          <Btn variant="ghost" onClick={() => openPlan(m)} disabled={busy} style={{ fontSize: 11.5, padding: "4px 10px" }}>📋 Plan</Btn>
+        )}
+        <span style={{ fontSize: 11, color: T.textMuted, minWidth: 50, textAlign: "right" }}>
+          {busy ? "…" : locked ? "Locked" : "Unlocked"}
+        </span>
+        <LockToggle locked={locked} busy={busy} onToggle={() => handleToggle(m)} />
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {toast && <Toast message={toast.message} type={toast.type} onDone={() => setToast(null)} />}
+
+      {assignModal && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}
+          onClick={e => e.target === e.currentTarget && setAssignModal(null)}>
+          <div style={{ background: T.surface, borderRadius: 14, padding: 24, width: 380, border: `0.5px solid ${T.border}` }}>
+            <div style={{ fontSize: 15, fontWeight: 600, color: T.text, marginBottom: 4 }}>Assign trainer & unlock</div>
+            <div style={{ fontSize: 12.5, color: T.textMuted, marginBottom: 16 }}>{assignModal.name || assignModal.email}</div>
+            <label style={{ fontSize: 12, color: T.textMuted, fontWeight: 500, display: "block", marginBottom: 6 }}>Trainer</label>
+            <select value={selectedTrainer} onChange={e => setSelectedTrainer(e.target.value)}
+              style={{ border: `0.5px solid ${T.borderMid}`, borderRadius: 8, padding: "8px 11px", fontSize: 13, width: "100%", background: T.bg, color: T.text, marginBottom: 20 }}>
+              {trainers.map(t => <option key={t.trainer_id} value={t.trainer_id}>{t.name} — {t.specialty}</option>)}
+            </select>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button onClick={() => setAssignModal(null)} style={{ padding: "8px 16px", borderRadius: 8, border: `0.5px solid ${T.borderMid}`, background: T.bg, color: T.textMid, fontSize: 13, cursor: "pointer" }}>Cancel</button>
+              <button onClick={confirmUnlock} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: T.teal600, color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Assign & Unlock</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {planModal && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}
+          onClick={e => e.target === e.currentTarget && setPlanModal(null)}>
+          <div style={{ background: T.surface, borderRadius: 14, padding: 24, width: 460, border: `0.5px solid ${T.border}` }}>
+            <div style={{ fontSize: 15, fontWeight: 600, color: T.text, marginBottom: 4 }}>Fitness plan</div>
+            <div style={{ fontSize: 12.5, color: T.textMuted, marginBottom: 16 }}>{planModal.name || planModal.email}</div>
+            <textarea
+              value={planModal.text}
+              onChange={e => setPlanModal(p => ({ ...p, text: e.target.value }))}
+              rows={8}
+              placeholder={"Week 1: Full body basics...\nWeek 2: ..."}
+              style={{ border: `0.5px solid ${T.borderMid}`, borderRadius: 8, padding: "10px 12px", fontSize: 13, width: "100%", boxSizing: "border-box", resize: "vertical", background: T.bg, color: T.text, marginBottom: 20 }}
+            />
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button onClick={() => setPlanModal(null)} style={{ padding: "8px 16px", borderRadius: 8, border: `0.5px solid ${T.borderMid}`, background: T.bg, color: T.textMid, fontSize: 13, cursor: "pointer" }}>Cancel</button>
+              <button onClick={savePlan} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: T.teal600, color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Save Plan</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 18 }}>
+        {[
+          { label: "Total Members", value: members.length, color: T.text,    bg: T.surface },
+          { label: "Locked",        value: lockedCount,    color: T.red600,  bg: T.red50   },
+          { label: "Unlocked",      value: members.length - lockedCount, color: T.teal600, bg: T.teal50 },
+        ].map(s => (
+          <div key={s.label} style={{ background: T.surface, border: `0.5px solid ${T.border}`, borderRadius: 10, padding: "14px 16px" }}>
+            <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 4 }}>{s.label}</div>
+            <div style={{ fontSize: 24, fontWeight: 500, color: s.color }}>{s.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {error && <div style={{ fontSize: 12, color: T.red600, background: T.red50, padding: "10px 14px", borderRadius: 8, marginBottom: 14 }}>{error}</div>}
+
+      <div style={{ fontSize: 12.5, color: T.textMuted, marginBottom: 14, lineHeight: 1.5 }}>
+        Flip the switch to unlock a member's <strong>Add Exercises / Fitness Plan</strong> tabs — this requires assigning them a trainer. Their trainer and fitness plan can be updated anytime, even while locked. New members are locked by default until you assign a trainer.
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <div style={{ fontSize: 12, color: T.textMuted }}>{filtered.length} member{filtered.length !== 1 ? "s" : ""} match your search</div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search name or email"
+            style={{ border: `0.5px solid ${T.borderMid}`, borderRadius: 8, padding: "5px 10px", fontSize: 12, background: T.bg, color: T.text, outline: "none", width: 180 }} />
+          <Btn variant="ghost" onClick={loadAll} style={{ fontSize: 11, padding: "4px 10px" }}>🔄 Refresh</Btn>
+        </div>
+      </div>
+
+      {loading ? <Spinner /> : filtered.length === 0 ? (
+        <Card><Empty msg={members.length === 0 ? "No members yet." : "No members match your search."} /></Card>
+      ) : (
+        <>
+          <Card style={{ marginBottom: 16 }}>
+            <CardHeader title={`🔒 Locked (${lockedMembers.length})`} />
+            {lockedMembers.length === 0
+              ? <Empty msg="No locked members." />
+              : <div>{lockedMembers.map(MemberRow)}</div>}
+          </Card>
+
+          <Card>
+            <CardHeader title={`🔓 Unlocked (${unlockedMembers.length})`} />
+            {unlockedMembers.length === 0
+              ? <Empty msg="No unlocked members." />
+              : <div>{unlockedMembers.map(MemberRow)}</div>}
+          </Card>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── Banners Tab ───────────────────────────────────────────────────────────────
 function BannersTab({ gymId, onRefresh }) {
   const [banners, setBanners]           = useState([]);
@@ -977,7 +2038,7 @@ function BannersTab({ gymId, onRefresh }) {
   const [confirm, setConfirm]           = useState(null);
   const [toast, setToast]               = useState(null);
   const [error, setError]               = useState("");
-  const [form, setForm]                 = useState({ title: "", screen: "home", status: "active", expires_at: "", });
+  const [form, setForm]                 = useState({ title: "", screen: "home", status: "active", expires_at: "", deep_link: "" });
   const [imageB64, setImageB64]         = useState("");
   const [previewUrl, setPreviewUrl]     = useState("");
   const fileRef = useRef();
@@ -1013,7 +2074,7 @@ function BannersTab({ gymId, onRefresh }) {
         method: "POST",
         body: JSON.stringify({ ...form, gym_id: gymId, image_base64: imageB64 || undefined }),
       });
-      setForm({ title: "", screen: "home", status: "active", expires_at: ""});
+      setForm({ title: "", screen: "home", status: "active", expires_at: "", deep_link: "" });
       setImageB64(""); setPreviewUrl(""); setShowForm(false);
       await loadBanners();
       onRefresh();
@@ -1167,7 +2228,7 @@ function NotificationsTab({ gymId, onRefresh }) {
   const [confirm, setConfirm]             = useState(null);
   const [toast, setToast]                 = useState(null);
   const [error, setError]                 = useState("");
-  const [form, setForm]                   = useState({ title: "", body: "", type: "general" });
+  const [form, setForm]                   = useState({ title: "", body: "", type: "general", deep_link: "" });
   const set = k => v => setForm(f => ({ ...f, [k]: v }));
 
   async function loadNotifications() {
@@ -1310,8 +2371,15 @@ function NotificationsTab({ gymId, onRefresh }) {
 }
 
 // ── Config Tab ────────────────────────────────────────────────────────────────
-function ConfigTab() {
+function ConfigTab({ gymId }) {
   const gymInfo = JSON.parse(sessionStorage.getItem("gym_info") || "{}");
+  const [agreement, setAgreement] = useState(null);
+
+  useEffect(() => {
+    if (!gymId) return;
+    apiFetch(`/gym/${gymId}/agreement`).then(setAgreement).catch(() => setAgreement(null));
+  }, [gymId]);
+
   const items = [
     { label: "Gym Name",    value: gymInfo.gym_name    || "—" },
     { label: "Gym ID",      value: gymInfo.gym_id      || "—" },
@@ -1320,17 +2388,33 @@ function ConfigTab() {
     { label: "AI Model",    value: "gemini-2.5-flash-lite" },
   ];
   return (
-    <Card>
-      <CardHeader title="Gym Config" icon="⚙" />
-      <div style={{ padding: "14px 18px", display: "flex", flexDirection: "column" }}>
-        {items.map((c, i) => (
-          <div key={c.label} style={{ display: "flex", alignItems: "center", padding: "12px 0", borderBottom: i < items.length - 1 ? `0.5px solid ${T.border}` : "none" }}>
-            <div style={{ flex: 1, fontSize: 13, fontWeight: 500, color: T.text }}>{c.label}</div>
-            <div style={{ fontSize: 12, color: T.teal600, background: T.teal50, padding: "4px 10px", borderRadius: 8, fontFamily: "monospace" }}>{c.value}</div>
+    <div>
+      <Card>
+        <CardHeader title="Gym Config" icon="⚙" />
+        <div style={{ padding: "14px 18px", display: "flex", flexDirection: "column" }}>
+          {items.map((c, i) => (
+            <div key={c.label} style={{ display: "flex", alignItems: "center", padding: "12px 0", borderBottom: i < items.length - 1 ? `0.5px solid ${T.border}` : "none" }}>
+              <div style={{ flex: 1, fontSize: 13, fontWeight: 500, color: T.text }}>{c.label}</div>
+              <div style={{ fontSize: 12, color: T.teal600, background: T.teal50, padding: "4px 10px", borderRadius: 8, fontFamily: "monospace" }}>{c.value}</div>
+            </div>
+          ))}
+        </div>
+      </Card>
+      {agreement && (
+        <Card style={{ marginTop: 16 }}>
+          <CardHeader title="Partnership Agreement" icon="📝" />
+          <div style={{ padding: "14px 18px", display: "flex", alignItems: "center", gap: 14 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, fontWeight: 500, color: T.text }}>Signed on {fmtDate(agreement.agreement_date?.split("-").reverse().join("-") || agreement.created_at)}</div>
+              <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>Signed by {agreement.admin_name} · ID: {agreement.id_type}</div>
+            </div>
+            {agreement.agreement_pdf_url && (
+              <Btn variant="ghost" onClick={() => window.open(agreement.agreement_pdf_url, "_blank")}>📄 View PDF</Btn>
+            )}
           </div>
-        ))}
-      </div>
-    </Card>
+        </Card>
+      )}
+    </div>
   );
 }
 
@@ -1348,6 +2432,10 @@ export default function AdminDashboard() {
   const [activationRequired, setActivationRequired] = useState(false);
   const [activationExpired, setActivationExpired]   = useState(false);
   const [activationAmount, setActivationAmount]     = useState(5000);
+
+  // ── Gym Partnership Agreement gate — runs once activation is resolved ──────
+  const [checkingAgreement, setCheckingAgreement] = useState(true);
+  const [agreementRequired, setAgreementRequired] = useState(false);
 
   const [proExpiresAt, setProExpiresAt]         = useState(null);
   const [proDaysLeft, setProDaysLeft]           = useState(null);
@@ -1393,9 +2481,19 @@ export default function AdminDashboard() {
       .finally(() => setCheckingActivation(false));
   }, [authed, gymId]);
 
+  // ── Once activation is confirmed NOT required, check the agreement gate ────
   useEffect(() => {
-    if (authed && !checkingActivation && !activationRequired) loadAll();
-  }, [authed, checkingActivation, activationRequired]);
+    if (!authed || !gymId || checkingActivation || activationRequired) return;
+    setCheckingAgreement(true);
+    apiFetch(`/gym/${gymId}/agreement-status`)
+      .then(s => setAgreementRequired(!!s.required))
+      .catch(() => setAgreementRequired(false))
+      .finally(() => setCheckingAgreement(false));
+  }, [authed, gymId, checkingActivation, activationRequired]);
+
+  useEffect(() => {
+    if (authed && !checkingActivation && !activationRequired && !checkingAgreement && !agreementRequired) loadAll();
+  }, [authed, checkingActivation, activationRequired, checkingAgreement, agreementRequired]);
 
   function handleRenewed(newExpiresAt) {
     setShowRenewModal(false);
@@ -1416,6 +2514,16 @@ export default function AdminDashboard() {
         amount={activationAmount}
         expired={activationExpired}
         onActivated={() => setActivationRequired(false)}
+      />
+    );
+  }
+  if (checkingAgreement) return <FullScreenSpinner />;
+  if (agreementRequired) {
+    return (
+      <AgreementGate
+        gymInfo={gymInfo}
+        monthlyFee={35}
+        onSigned={() => setAgreementRequired(false)}
       />
     );
   }
@@ -1493,7 +2601,7 @@ export default function AdminDashboard() {
           <div style={{ fontSize: 15, fontWeight: 500, color: T.text }}>{currentLabel}</div>
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={loadAll} style={{ width: 34, height: 34, borderRadius: 8, border: `0.5px solid ${T.border}`, background: "none", cursor: "pointer", fontSize: 15 }} title="Refresh">🔄</button>
-            <button onClick={() => { sessionStorage.removeItem("af_admin"); sessionStorage.removeItem("gym_info"); setAuthed(false); setCheckingActivation(true); setActivationRequired(false); }} style={{ height: 34, borderRadius: 8, border: `0.5px solid ${T.border}`, background: "none", cursor: "pointer", fontSize: 12, color: T.textMuted, padding: "0 12px" }}>Sign out</button>
+            <button onClick={() => { sessionStorage.removeItem("af_admin"); sessionStorage.removeItem("gym_info"); setAuthed(false); setCheckingActivation(true); setActivationRequired(false); setCheckingAgreement(true); setAgreementRequired(false); }} style={{ height: 34, borderRadius: 8, border: `0.5px solid ${T.border}`, background: "none", cursor: "pointer", fontSize: 12, color: T.textMuted, padding: "0 12px" }}>Sign out</button>
           </div>
         </div>
         <div style={{ padding: 24, maxWidth: 1100 }}>
@@ -1517,10 +2625,13 @@ export default function AdminDashboard() {
             <>
               {active === "dashboard"     && <DashboardTab banners={banners} notifications={notifications} userIds={userIds} billingSummary={billingSummary} />}
               {active === "user_ids"      && <UserIdsTab gymInfo={gymInfo} />}
+              {active === "workout_access" && <WorkoutAccessTab gymId={gymId} />}
               {active === "billing"       && <BillingTab gymId={gymId} onRefresh={refreshBillingBadge} />}
               {active === "banners"       && <BannersTab gymId={gymId} onRefresh={loadAll} />}
+              {active === "trainers"      && <TrainersTab gymId={gymId} />} 
               {active === "notifications" && <NotificationsTab gymId={gymId} onRefresh={loadAll} />}
-              {active === "config"        && <ConfigTab />}
+              {active === "batches"       && <BatchesTab gymId={gymId} />}
+              {active === "config"        && <ConfigTab gymId={gymId} />}
             </>
           )}
         </div>
