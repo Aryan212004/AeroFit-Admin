@@ -107,6 +107,39 @@ export default function ConsoleSelector() {
           padding-bottom: 60px;
         }
 
+        /* ---------- Header wrap (adds the small super-admin button) ---------- */
+        .af-header-wrap {
+          width: 100%;
+          position: relative;
+        }
+        .af-super-admin-btn {
+          position: absolute;
+          top: 22px;
+          right: 148px;
+          z-index: 5;
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          font-family: 'DM Sans', sans-serif;
+          font-size: 13px;
+          font-weight: 600;
+          color: #534AB7;
+          background: #EEEDFE;
+          border: none;
+          padding: 8px 14px;
+          border-radius: 8px;
+          cursor: pointer;
+          transition: background 0.2s ease;
+          white-space: nowrap;
+        }
+        .af-super-admin-btn:hover { background: #E2DFFC; }
+        @media (max-width: 520px) {
+          .af-super-admin-btn {
+            position: static;
+            margin: 14px 24px 0;
+          }
+        }
+
         /* ---------- Shared nav (same classes Header.jsx renders into) ---------- */
         .af-nav {
           max-width: 1140px;
@@ -209,14 +242,13 @@ export default function ConsoleSelector() {
         /* ---------- Tiles ---------- */
         .af-tiles {
           display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
+          grid-template-columns: minmax(0, 1fr);
           gap: 22px;
           width: 100%;
-          max-width: 900px;
+          max-width: 460px;
           margin-top: 50px;
           padding: 0 24px;
         }
-        @media (max-width: 720px) { .af-tiles { grid-template-columns: 1fr; } }
 
         .af-tile {
           text-align: left;
@@ -323,7 +355,12 @@ export default function ConsoleSelector() {
         }
       `}</style>
 
-      <Header actionLabel="Back to site" actionTo="/" links={false} />
+      <div className="af-header-wrap">
+        <button className="af-super-admin-btn" onClick={() => nav('/super-admin')}>
+          👑 Super Admin
+        </button>
+        <Header actionLabel="Back to site" actionTo="/" links={false} />
+      </div>
 
       <div className="af-statusbar">
         <div className="af-status-left">
@@ -354,17 +391,6 @@ export default function ConsoleSelector() {
           points={['Manage members & subscriptions', 'Push banners & notifications', 'Track gym-level billing']}
           cta="Open console"
           onClick={() => nav('/gym-admin')}
-        />
-        <ConsoleTile
-          accent="#534AB7"
-          tint="#EEEDFE"
-          icon="👑"
-          eyebrow="PLATFORM CONTROL"
-          title="Super Admin Console"
-          description="Oversee every gym on Aerofit — onboarding, admins, platform billing and stats."
-          points={['Create & manage gyms', 'Assign gym admins', 'View platform-wide stats']}
-          cta="Open console"
-          onClick={() => nav('/super-admin')}
         />
       </div>
 

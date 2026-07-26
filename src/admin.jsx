@@ -101,6 +101,30 @@ function isWorkoutLocked(m) {
   return m?.workout_plans_locked !== false;
 }
 
+// ── Small clipboard helper shared by Trainers & Batches tabs ─────────────────
+async function copyTextToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (_) {
+    // Fallback for environments without clipboard API access
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+}
+
 function ConfirmDialog({ message, onConfirm, onCancel }) {
   return (
     <div style={{
@@ -545,8 +569,13 @@ function ProActivationGate({ gymInfo, amount, expired, onActivated }) {
   );
 }
 
+// ── Trainers Tab ──────────────────────────────────────────────────────────────
+// Now also pulls the gym's member list so each trainer's row can show how
+// many clients are assigned to them, plus an expandable list of client names
+// with a one-click "Copy names" action for the admin.
 function TrainersTab({ gymId }) {
   const [trainers, setTrainers]     = useState([]);
+  const [members, setMembers]       = useState([]);
   const [loading, setLoading]       = useState(true);
   const [showForm, setShowForm]     = useState(false);
   const [editingTrainer, setEditingTrainer] = useState(null); // trainer object being edited, or null = "add" mode
@@ -555,21 +584,58 @@ function TrainersTab({ gymId }) {
   const [confirm, setConfirm]       = useState(null);
   const [toast, setToast]           = useState(null);
   const [error, setError]           = useState("");
+  const [expandedId, setExpandedId] = useState(null); // trainer_id currently showing its client list
+  const [copiedId, setCopiedId]     = useState(null);
 
   const emptyForm = { name: "", specialty: "", experience_years: 1, certifications: "" };
   const [form, setForm] = useState(emptyForm);
   const set = k => v => setForm(f => ({ ...f, [k]: v }));
 
   async function loadTrainers() {
-    setLoading(true);
     try {
       const data = await apiFetch(`/gym/${gymId}/trainers`);
       setTrainers(Array.isArray(data) ? data : []);
     } catch { setTrainers([]); }
-    finally { setLoading(false); }
   }
 
-  useEffect(() => { loadTrainers(); }, [gymId]);
+  async function loadMembers() {
+    try {
+      const data = await apiFetch(`/gym/${gymId}/members`);
+      setMembers(Array.isArray(data) ? data : []);
+    } catch { setMembers([]); }
+  }
+
+  async function loadAll() {
+    setLoading(true);
+    await Promise.all([loadTrainers(), loadMembers()]);
+    setLoading(false);
+  }
+
+  useEffect(() => { loadAll(); }, [gymId]);
+
+  // Matches primarily on assigned_trainer_id; falls back to matching on the
+  // trainer's name for any older member records that only stored the name.
+  function clientsFor(trainer) {
+    return members.filter(m =>
+      m.assigned_trainer_id
+        ? m.assigned_trainer_id === trainer.trainer_id
+        : m.assigned_trainer_name === trainer.name
+    );
+  }
+
+  async function copyClients(trainer) {
+    const clients = clientsFor(trainer);
+    if (clients.length === 0) return;
+    const text = clients.map(c => c.name || c.email).join("\n");
+    const ok = await copyTextToClipboard(text);
+    if (ok) {
+      setCopiedId(trainer.trainer_id);
+      setToast({ message: `Copied ${clients.length} client name${clients.length > 1 ? "s" : ""}`, type: "success" });
+      setTimeout(() => setCopiedId(null), 1800);
+    } else {
+      setToast({ message: "Could not copy to clipboard", type: "error" });
+    }
+  }
 
   function openAddForm() {
     setEditingTrainer(null);
@@ -624,7 +690,7 @@ function TrainersTab({ gymId }) {
         setToast({ message: "Trainer added", type: "success" });
       }
       closeForm();
-      await loadTrainers();
+      await loadAll();
     } catch (e) { setError(e.message); }
     finally { setSubmitting(false); }
   }
@@ -640,7 +706,7 @@ function TrainersTab({ gymId }) {
       await apiFetch(`/gym/${gymId}/trainers/${id}`, { method: "DELETE" });
       setToast({ message: `"${title}" removed`, type: "success" });
     } catch (e) {
-      await loadTrainers();
+      await loadAll();
       setToast({ message: `Delete failed: ${e.message}`, type: "error" });
     } finally { setDeletingId(null); }
   }
@@ -682,7 +748,7 @@ function TrainersTab({ gymId }) {
 
       <Card>
         <CardHeader title={`Trainers (${trainers.length})`} icon="🏋️"
-          action={<Btn variant="ghost" onClick={loadTrainers} style={{ fontSize: 11, padding: "4px 10px" }}>🔄 Refresh</Btn>}
+          action={<Btn variant="ghost" onClick={loadAll} style={{ fontSize: 11, padding: "4px 10px" }}>🔄 Refresh</Btn>}
         />
         {loading ? <Spinner /> : trainers.length === 0 ? (
           <Empty msg="No trainers yet. Add one above to show it in the app." />
@@ -690,33 +756,76 @@ function TrainersTab({ gymId }) {
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
               <thead>
-                <tr>{["Name", "Specialty", "Experience", "Certifications", ""].map(h => (
+                <tr>{["Name", "Specialty", "Experience", "Certifications", "Clients", ""].map(h => (
                   <th key={h} style={{ textAlign: "left", fontSize: 10.5, fontWeight: 500, color: T.textMuted, padding: "8px 14px", borderBottom: `0.5px solid ${T.border}`, textTransform: "uppercase" }}>{h}</th>
                 ))}</tr>
               </thead>
               <tbody>
-                {trainers.map(t => (
-                  <tr key={t.trainer_id} style={{ borderBottom: `0.5px solid ${T.border}`, opacity: deletingId === t.trainer_id ? 0.4 : 1 }}>
-                    <td style={{ padding: "11px 14px", fontWeight: 500, color: T.text }}>{t.name}</td>
-                    <td style={{ padding: "11px 14px", color: T.textMuted }}>{t.specialty}</td>
-                    <td style={{ padding: "11px 14px", color: T.textMuted }}>{t.experience_years} yrs</td>
-                    <td style={{ padding: "11px 14px" }}>
-                      <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
-                        {(t.certifications || []).map(c => <Badge key={c} label={c} />)}
-                      </div>
-                    </td>
-                    <td style={{ padding: "11px 14px" }}>
-                      <div style={{ display: "flex", gap: 6 }}>
-                        <Btn variant="ghost" onClick={() => openEditForm(t)} style={{ fontSize: 12, padding: "4px 10px" }}>
-                          ✏️ Edit
-                        </Btn>
-                        <Btn variant="danger" onClick={() => askDelete(t)} disabled={deletingId === t.trainer_id} style={{ fontSize: 12, padding: "4px 10px" }}>
-                          {deletingId === t.trainer_id ? "Removing…" : "Remove"}
-                        </Btn>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                {trainers.map(t => {
+                  const clients = clientsFor(t);
+                  const isExpanded = expandedId === t.trainer_id;
+                  return (
+                    <Fragment key={t.trainer_id}>
+                      <tr style={{ borderBottom: `0.5px solid ${T.border}`, opacity: deletingId === t.trainer_id ? 0.4 : 1 }}>
+                        <td style={{ padding: "11px 14px", fontWeight: 500, color: T.text }}>{t.name}</td>
+                        <td style={{ padding: "11px 14px", color: T.textMuted }}>{t.specialty}</td>
+                        <td style={{ padding: "11px 14px", color: T.textMuted }}>{t.experience_years} yrs</td>
+                        <td style={{ padding: "11px 14px" }}>
+                          <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+                            {(t.certifications || []).map(c => <Badge key={c} label={c} />)}
+                          </div>
+                        </td>
+                        <td style={{ padding: "11px 14px" }}>
+                          <button
+                            onClick={() => setExpandedId(isExpanded ? null : t.trainer_id)}
+                            disabled={clients.length === 0}
+                            style={{
+                              display: "flex", alignItems: "center", gap: 6,
+                              fontSize: 11.5, fontWeight: 600, background: clients.length > 0 ? T.teal50 : T.gray50,
+                              color: clients.length > 0 ? T.teal600 : T.gray600,
+                              border: "none", borderRadius: 20, padding: "4px 10px",
+                              cursor: clients.length === 0 ? "default" : "pointer",
+                            }}
+                          >
+                            👥 {clients.length} client{clients.length !== 1 ? "s" : ""}
+                            {clients.length > 0 && <span>{isExpanded ? "▲" : "▼"}</span>}
+                          </button>
+                        </td>
+                        <td style={{ padding: "11px 14px" }}>
+                          <div style={{ display: "flex", gap: 6 }}>
+                            <Btn variant="ghost" onClick={() => openEditForm(t)} style={{ fontSize: 12, padding: "4px 10px" }}>
+                              ✏️ Edit
+                            </Btn>
+                            <Btn variant="danger" onClick={() => askDelete(t)} disabled={deletingId === t.trainer_id} style={{ fontSize: 12, padding: "4px 10px" }}>
+                              {deletingId === t.trainer_id ? "Removing…" : "Remove"}
+                            </Btn>
+                          </div>
+                        </td>
+                      </tr>
+                      {isExpanded && clients.length > 0 && (
+                        <tr style={{ borderBottom: `0.5px solid ${T.border}` }}>
+                          <td colSpan={6} style={{ padding: "10px 14px 14px", background: T.bg }}>
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                              <div style={{ fontSize: 11, color: T.textMuted }}>
+                                Clients assigned to {t.name} ({clients.length}):
+                              </div>
+                              <Btn variant="ghost" onClick={() => copyClients(t)} style={{ fontSize: 11, padding: "4px 10px" }}>
+                                {copiedId === t.trainer_id ? "✓ Copied" : "📋 Copy names"}
+                              </Btn>
+                            </div>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                              {clients.map(c => (
+                                <span key={c.email} title={c.email} style={{ fontSize: 11, background: T.teal50, color: T.teal600, padding: "3px 9px", borderRadius: 20 }}>
+                                  {c.name || c.email}
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -1282,10 +1391,9 @@ function BillingNotifications({ gymId }) {
   );
 }
 
-// ── Batches Tab ───────────────────────────────────────────────────────────────
-// ── Batches Tab ───────────────────────────────────────────────────────────────
 function BatchesTab({ gymId }) {
   const [batches, setBatches]       = useState([]);
+  const [members, setMembers]       = useState([]); // needed to resolve email -> name
   const [loading, setLoading]       = useState(true);
   const [showForm, setShowForm]     = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -1294,23 +1402,41 @@ function BatchesTab({ gymId }) {
   const [confirm, setConfirm]       = useState(null);
   const [toast, setToast]           = useState(null);
   const [error, setError]           = useState("");
-  const [expandedId, setExpandedId] = useState(null); // batch_id currently showing its member list
+  const [expandedId, setExpandedId] = useState(null);
+  const [copiedId, setCopiedId]     = useState(null);
 
   const DAY_OPTIONS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
   const emptyForm = { name: "", days: [], startTime: "", endTime: "", trainer_name: "", capacity: 20 };
   const [form, setForm] = useState(emptyForm);
   const set = k => v => setForm(f => ({ ...f, [k]: v }));
 
+  // quick lookup so enrolled_emails can be displayed as names
+  const emailToName = Object.fromEntries(members.map(m => [m.email, m.name || m.email]));
+  function displayNameFor(email) {
+    return emailToName[email] || email;
+  }
+
   async function loadBatches() {
-    setLoading(true);
     try {
       const data = await apiFetch(`/gym/${gymId}/batches`);
       setBatches(Array.isArray(data) ? data : []);
     } catch { setBatches([]); }
-    finally { setLoading(false); }
   }
 
-  useEffect(() => { loadBatches(); }, [gymId]);
+  async function loadMembers() {
+    try {
+      const data = await apiFetch(`/gym/${gymId}/members`);
+      setMembers(Array.isArray(data) ? data : []);
+    } catch { setMembers([]); }
+  }
+
+  async function loadAll() {
+    setLoading(true);
+    await Promise.all([loadBatches(), loadMembers()]);
+    setLoading(false);
+  }
+
+  useEffect(() => { loadAll(); }, [gymId]);
 
   function toggleDay(day) {
     setForm(f => ({
@@ -1339,7 +1465,7 @@ function BatchesTab({ gymId }) {
       });
       setForm(emptyForm);
       setShowForm(false);
-      await loadBatches();
+      await loadAll();
       setToast({ message: "Batch created", type: "success" });
     } catch (e) { setError(e.message); }
     finally { setSubmitting(false); }
@@ -1353,7 +1479,7 @@ function BatchesTab({ gymId }) {
         body: JSON.stringify({ member_count: count }),
       });
     } catch (e) {
-      await loadBatches();
+      await loadAll();
       setToast({ message: "Failed to update: " + e.message, type: "error" });
     } finally { setEditingId(null); }
   }
@@ -1369,7 +1495,7 @@ function BatchesTab({ gymId }) {
       await apiFetch(`/gym/${gymId}/batches/${id}`, { method: "DELETE" });
       setToast({ message: `"${title}" deleted`, type: "success" });
     } catch (e) {
-      await loadBatches();
+      await loadAll();
       setToast({ message: `Delete failed: ${e.message}`, type: "error" });
     } finally { setDeletingId(null); }
   }
@@ -1381,6 +1507,20 @@ function BatchesTab({ gymId }) {
     const enrolled = b.enrolled_emails;
     if (Array.isArray(enrolled)) return enrolled.length;
     return b.member_count ?? 0;
+  }
+
+  async function copyEnrolled(batch) {
+    const enrolled = Array.isArray(batch.enrolled_emails) ? batch.enrolled_emails : [];
+    if (enrolled.length === 0) return;
+    const text = enrolled.map(displayNameFor).join("\n");
+    const ok = await copyTextToClipboard(text);
+    if (ok) {
+      setCopiedId(batch.batch_id);
+      setToast({ message: `Copied ${enrolled.length} member name${enrolled.length > 1 ? "s" : ""}`, type: "success" });
+      setTimeout(() => setCopiedId(null), 1800);
+    } else {
+      setToast({ message: "Could not copy to clipboard", type: "error" });
+    }
   }
 
   return (
@@ -1440,7 +1580,7 @@ function BatchesTab({ gymId }) {
 
       <Card>
         <CardHeader title={`Batches (${batches.length})`} icon="📅"
-          action={<Btn variant="ghost" onClick={loadBatches} style={{ fontSize: 11, padding: "4px 10px" }}>🔄 Refresh</Btn>}
+          action={<Btn variant="ghost" onClick={loadAll} style={{ fontSize: 11, padding: "4px 10px" }}>🔄 Refresh</Btn>}
         />
         {loading ? <Spinner /> : batches.length === 0 ? (
           <Empty msg="No batches yet. Create one above to show it in the app." />
@@ -1497,13 +1637,18 @@ function BatchesTab({ gymId }) {
                       {isExpanded && hasEnrolledList && (
                         <tr style={{ borderBottom: `0.5px solid ${T.border}` }}>
                           <td colSpan={5} style={{ padding: "8px 14px 12px", background: T.bg }}>
-                            <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 6 }}>
-                              Enrolled members ({enrolled.length}):
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                              <div style={{ fontSize: 11, color: T.textMuted }}>
+                                Enrolled members ({enrolled.length}):
+                              </div>
+                              <Btn variant="ghost" onClick={() => copyEnrolled(b)} style={{ fontSize: 11, padding: "4px 10px" }}>
+                                {copiedId === b.batch_id ? "✓ Copied" : "📋 Copy names"}
+                              </Btn>
                             </div>
                             <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                               {enrolled.map(email => (
-                                <span key={email} style={{ fontSize: 11, background: T.teal50, color: T.teal600, padding: "3px 9px", borderRadius: 20 }}>
-                                  {email}
+                                <span key={email} title={email} style={{ fontSize: 11, background: T.teal50, color: T.teal600, padding: "3px 9px", borderRadius: 20 }}>
+                                  {displayNameFor(email)}
                                 </span>
                               ))}
                             </div>
