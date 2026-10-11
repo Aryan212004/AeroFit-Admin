@@ -2,6 +2,9 @@ import { useState, useEffect } from "react";
 
 const API = "https://aero-fit-backend.onrender.com";
 
+// Retries once (for Render cold starts) on network errors / 5xx only.
+// 4xx errors (401 bad login, 409 duplicate email, 400 validation) fail
+// immediately instead of making the admin wait 4s for a pointless retry.
 async function apiFetch(path, opts = {}) {
   const url = `${API}${path}`;
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -10,10 +13,15 @@ async function apiFetch(path, opts = {}) {
         headers: { "Content-Type": "application/json" },
         ...opts,
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const err = new Error(`HTTP ${res.status}`);
+        err.status = res.status;
+        throw err;
+      }
       return res.json();
     } catch (e) {
-      if (attempt === 0) { await new Promise(r => setTimeout(r, 4000)); continue; }
+      const clientError = e.status && e.status >= 400 && e.status < 500;
+      if (attempt === 0 && !clientError) { await new Promise(r => setTimeout(r, 4000)); continue; }
       throw e;
     }
   }
@@ -185,9 +193,6 @@ function SuperAdminLogin({ onLogin }) {
           <button onClick={login} disabled={loading} style={{ background: T.teal600, color: "#fff", border: "none", borderRadius: 8, padding: "11px", fontSize: 13.5, fontWeight: 600, cursor: loading ? "not-allowed" : "pointer", marginTop: 4, opacity: loading ? 0.7 : 1 }}>
             {loading ? "Signing in…" : "Sign In"}
           </button>
-        </div>
-        <div style={{ marginTop: 20, fontSize: 11.5, color: T.textMuted, textAlign: "center", lineHeight: 1.6 }}>
-          Default: <code style={{ background: T.bg, padding: "3px 7px", borderRadius: 4 }}></code>
         </div>
       </div>
     </div>
@@ -845,7 +850,7 @@ function DashboardTab({ stats, gyms, onAddGym }) {
   const top5 = [...gyms].sort((a, b) => (b.members || 0) - (a.members || 0)).slice(0, 5);
   const maxM  = top5[0]?.members || 1;
 
-  // ── NEW: Pro gyms whose activation or monthly cycle renews within 5 days ──
+  // Pro gyms whose activation or monthly cycle renews within 5 days
   const proAtRisk = gyms.filter(g => {
     if (g.plan !== "Pro") return false;
     const actD = daysUntil(g.pro_fee_expires_at);
@@ -1136,6 +1141,126 @@ function AdminsTab({ admins, onRefresh }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+//  ADD INDIE USER MODAL (super admin — no payment, creates app login directly)
+// ══════════════════════════════════════════════════════════════════════════════
+function AddIndieUserModal({ onCreated, onClose }) {
+  const [form, setForm] = useState({ name: "", email: "", password: "", months: 1, weight_kg: "", height_cm: "" });
+  const [loading, setLoading] = useState(false);
+  const [error, setError]     = useState("");
+  const [created, setCreated] = useState(null);
+  const [copied, setCopied]   = useState(false);
+  const set = k => v => setForm(f => ({ ...f, [k]: v }));
+
+  function generatePassword() {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+    let pw = "";
+    for (let i = 0; i < 10; i++) pw += chars[Math.floor(Math.random() * chars.length)];
+    set("password")(pw);
+  }
+
+  async function submit() {
+    const email = form.email.trim().toLowerCase();
+    const password = form.password.trim();
+    if (!email || !password) { setError("Email and password are required"); return; }
+    if (!/^[\w.-]+@[\w.-]+\.\w{2,}$/.test(email)) { setError("Enter a valid email"); return; }
+    if (password.length < 6) { setError("Password must be at least 6 characters"); return; }
+    setLoading(true); setError("");
+    try {
+      const res = await apiFetch("/alpha/indie-users", {
+        method: "POST",
+        body: JSON.stringify({
+          email, password,
+          name: form.name.trim(),
+          months: Number(form.months) || 1,
+          weight_kg: parseFloat(form.weight_kg) || 70,
+          height_cm: parseFloat(form.height_cm) || 170,
+        }),
+      });
+      setCreated({ email, password, months: res.months, expires_at: res.expires_at });
+      onCreated();
+    } catch (e) {
+      setError(e.status === 409 ? "An account with that email already exists" : (e.message || "Failed to create user"));
+    } finally { setLoading(false); }
+  }
+
+  function copy() {
+    navigator.clipboard.writeText(`Email: ${created.email}\nPassword: ${created.password}`)
+      .then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); });
+  }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, fontFamily: "'DM Sans', system-ui, sans-serif" }}
+      onClick={e => e.target === e.currentTarget && !created && onClose()}>
+      <div style={{ background: T.surface, borderRadius: 18, width: 500, maxWidth: "96vw", border: `0.5px solid ${T.border}`, overflow: "hidden", boxShadow: "0 16px 48px rgba(0,0,0,0.14)" }}>
+        {created ? (
+          <>
+            <div style={{ padding: "18px 22px", borderBottom: `0.5px solid ${T.border}`, background: T.teal50, display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ width: 36, height: 36, borderRadius: 10, background: T.teal600, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>✓</div>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 600, color: T.teal700 }}>Indie User Created</div>
+                <div style={{ fontSize: 11.5, color: T.teal600, marginTop: 2 }}>They can log in to the app right now</div>
+              </div>
+            </div>
+            <div style={{ padding: 24 }}>
+              <div style={{ background: T.bg, borderRadius: 12, padding: "16px 18px", border: `0.5px solid ${T.borderMid}`, display: "flex", flexDirection: "column", gap: 12, marginBottom: 14 }}>
+                {[["Email", created.email], ["Password", created.password], ["Plan", `${created.months} month${created.months > 1 ? "s" : ""} · expires ${fmtDate(created.expires_at)}`]].map(([k, v]) => (
+                  <div key={k}>
+                    <div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.04em" }}>{k}</div>
+                    <div style={{ fontSize: 13, fontFamily: "monospace", color: T.teal600, fontWeight: 600, background: T.teal50, padding: "6px 10px", borderRadius: 7, marginTop: 4 }}>{v}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <Btn variant="ghost" onClick={copy}>{copied ? "✓ Copied!" : "📋 Copy Login"}</Btn>
+                <Btn variant="primary" onClick={onClose} style={{ padding: "8px 24px" }}>Done</Btn>
+              </div>
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={{ padding: "18px 22px", borderBottom: `0.5px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 600, color: T.text }}>👤 Add Indie User</div>
+                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>Creates an app login directly — no payment required</div>
+              </div>
+              <button onClick={onClose} style={{ background: T.bg, border: "none", borderRadius: 8, width: 32, height: 32, cursor: "pointer", fontSize: 16, color: T.textMuted }}>✕</button>
+            </div>
+            <div style={{ padding: 22, display: "flex", flexDirection: "column", gap: 14, maxHeight: "80vh", overflowY: "auto" }}>
+              <Input label="Email *" value={form.email} onChange={set("email")} type="email" placeholder="user@example.com" />
+              <div>
+                <label style={{ fontSize: 12, color: T.textMuted, fontWeight: 500, display: "block", marginBottom: 5 }}>Password *</label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input value={form.password} onChange={e => set("password")(e.target.value)} placeholder="Min 6 characters"
+                    style={{ flex: 1, border: `0.5px solid ${T.borderMid}`, borderRadius: 8, padding: "8px 11px", fontSize: 13, outline: "none", background: T.bg, color: T.text }} />
+                  <Btn variant="ghost" onClick={generatePassword} style={{ whiteSpace: "nowrap" }}>✨ Generate</Btn>
+                </div>
+              </div>
+              <Input label="Name (optional)" value={form.name} onChange={set("name")} placeholder="Defaults to the part before @" />
+              <div>
+                <label style={{ fontSize: 12, color: T.textMuted, fontWeight: 500, display: "block", marginBottom: 5 }}>Plan duration</label>
+                <select value={form.months} onChange={e => set("months")(e.target.value)}
+                  style={{ border: `0.5px solid ${T.borderMid}`, borderRadius: 8, padding: "8px 11px", fontSize: 13, width: "100%", background: T.bg, color: T.text }}>
+                  {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(m => <option key={m} value={m}>{m} month{m > 1 ? "s" : ""}</option>)}
+                </select>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <Input label="Weight (kg)" value={form.weight_kg} onChange={set("weight_kg")} type="number" placeholder="70" note="Optional — user can edit in app" />
+                <Input label="Height (cm)" value={form.height_cm} onChange={set("height_cm")} type="number" placeholder="170" note="Optional — user can edit in app" />
+              </div>
+              {error && <div style={{ fontSize: 12, color: T.red600, background: T.red50, padding: "10px 13px", borderRadius: 8, border: `0.5px solid ${T.red200}` }}>❌ {error}</div>}
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+                <Btn variant="primary" onClick={submit} disabled={loading} style={{ padding: "8px 24px" }}>{loading ? "Creating…" : "Create User"}</Btn>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 //  MEMBERS TAB
 // ══════════════════════════════════════════════════════════════════════════════
 function MembersTab() {
@@ -1143,6 +1268,7 @@ function MembersTab() {
   const [loading, setLoading]       = useState(true);
   const [search, setSearch]         = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
+  const [showAddIndie, setShowAddIndie] = useState(false);
 
   async function loadMembers() {
     setLoading(true);
@@ -1217,11 +1343,18 @@ function MembersTab() {
 
   return (
     <div>
+      {showAddIndie && (
+        <AddIndieUserModal
+          onCreated={loadMembers}
+          onClose={() => setShowAddIndie(false)}
+        />
+      )}
+
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 20 }}>
         {[
           { label: "Total Members", value: totalMembers, sub: "all platforms",    bg: T.teal50,   color: T.teal600,   icon: "👥" },
           { label: "Gym Members",   value: gymMembers,   sub: "via gym User IDs", bg: T.purple50, color: T.purple600, icon: "🏢" },
-          { label: "Indie Members", value: indieMembers, sub: "via Razorpay",     bg: T.blue50,   color: T.blue600,   icon: "👤" },
+          { label: "Indie Members", value: indieMembers, sub: "Razorpay, Apple or manual", bg: T.blue50, color: T.blue600, icon: "👤" },
           { label: "Expired",       value: expiredCount, sub: "need renewal",     bg: T.red50,    color: T.red600,    icon: "⚠️" },
         ].map(s => (
           <div key={s.label} style={{ background: T.surface, border: `0.5px solid ${T.border}`, borderRadius: 12, padding: "16px 16px 14px" }}>
@@ -1260,8 +1393,9 @@ function MembersTab() {
           ))}
         </div>
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-          <Btn variant="ghost"  onClick={loadMembers}>🔄 Refresh</Btn>
-          <Btn variant="green"  onClick={exportCsv} style={{ gap: 5 }}>⬇ Export CSV</Btn>
+          <Btn variant="ghost"   onClick={loadMembers}>🔄 Refresh</Btn>
+          <Btn variant="green"   onClick={exportCsv} style={{ gap: 5 }}>⬇ Export CSV</Btn>
+          <Btn variant="primary" onClick={() => setShowAddIndie(true)}>👤 Add Indie User</Btn>
         </div>
       </div>
 
@@ -1298,7 +1432,9 @@ function MembersTab() {
                       </td>
                       <td style={{ padding: "10px 14px" }}>
                         {m.member_type === "indie" ? (
-                          <span style={{ fontSize: 11, padding: "3px 9px", borderRadius: 20, fontWeight: 500, background: T.purple50, color: T.purple600, whiteSpace: "nowrap" }}>👤 Indie</span>
+                          <span style={{ fontSize: 11, padding: "3px 9px", borderRadius: 20, fontWeight: 500, background: T.purple50, color: T.purple600, whiteSpace: "nowrap" }}>
+                            👤 Indie{m.payment_platform === "manual" ? " · Manual" : ""}
+                          </span>
                         ) : (
                           <span style={{ fontSize: 11, padding: "3px 9px", borderRadius: 20, fontWeight: 500, background: T.teal50, color: T.teal600, whiteSpace: "nowrap" }}>🏢 Gym</span>
                         )}
